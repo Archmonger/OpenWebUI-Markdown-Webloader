@@ -1,0 +1,45 @@
+# OpenWebUI-Markdown-Webloader
+# Run the markdown web loader next to a self-hosted OpenWebUI instance.
+#
+#   docker compose up -d
+#
+# Then point OpenWebUI at it (Admin -> Settings -> Web Loader):
+#   EXTERNAL_WEB_LOADER_URL = http://web-loader:14786
+#   EXTERNAL_WEB_LOADER_API_KEY = the API_KEY set below
+#
+services:
+  web-loader:
+    image: ghcr.io/ARCHMONGER/openwebui-markdown-webloader:latest
+    # build: .   # uncomment to build from source instead of pulling the image
+    container_name: openwebui-markdown-webloader
+    restart: unless-stopped
+    ports:
+      - "14786:14786"
+    environment:
+      API_PORT: "14786"
+      HOST: 0.0.0.0
+      # Authentication (recommended). OpenWebUI sends this as `Authorization: Bearer`.
+      API_KEY: ${WEB_LOADER_API_KEY:-change-me}
+      # Request / safety limits
+      REQUEST_TIMEOUT_MS: "30000"
+      URL_READ_MAX_CONTENT_LENGTH_BYTES: "5242880"
+      URL_READ_MAX_PDF_PAGES: "500"
+      MAX_BATCH_URLS: "100"
+      MAX_CONCURRENT_URLS: "10"
+      # Response cache
+      CACHE_TTL_MS: "86400000"
+      CACHE_MAX_ENTRIES: "500"
+      # SSRF defense — keep false unless you are intentionally allowing
+      # private/loopback fetches on a private network.
+      ALLOW_PRIVATE_URLS: "false"
+      # Optional egress proxy
+      # PROXY_URL: http://proxy:3128
+      # NO_PROXY: localhost,127.0.0.1
+      # Logging
+      LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:14786/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s

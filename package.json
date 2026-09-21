@@ -1,0 +1,38 @@
+{
+  "name": "openwebui-markdown-webloader",
+  "version": "0.1.0",
+  "description": "Open-WebUI compatible web loader engine that returns clean Markdown instead of raw HTML. Built with Bun.",
+  "license": "MIT",
+  "author": "Archmonger",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Archmonger/OpenWebUI-Markdown-Webloader"
+  },
+  "keywords": ["open-webui", "web-loader", "markdown", "bun", "llm", "ssrf", "rag"],
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src tests",
+    "lint:fix": "biome check --write src tests",
+    "format": "biome format --write src tests",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "node-html-markdown": "^2.0.0",
+    "node-html-parser": "^9.0.4",
+    "undici": "^8.10.2",
+    "unpdf": "^1.8.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}
