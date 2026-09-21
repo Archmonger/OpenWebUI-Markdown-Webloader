@@ -4,8 +4,6 @@ An [Open-WebUI](https://github.com/open-webui/open-webui)-compatible **web loade
 
 > **Why Markdown?** This project exists to improve LLM understanding of web content. LLMs are notably better at comprehending Markdown than raw HTML, JS, and CSS — all the scaffolding, inline styles, scripts, and markup noise get stripped away, leaving the semantic content and structure (`#` headings, `[links]`, `**emphasis**`, lists, et cetera) that a model can reason over most effectively. Feeding a model Markdown instead of a wall of tags reduces token waste and measurably improves retrieval and summarization quality in RAG pipelines and web-from-web agent workflows.
 
-It is a drop-in replacement for the reference [Edgaras0x4E/web-loader-engine](https://github.com/Edgaras0x4E/web-loader-engine), but it **always returns Markdown** — the conversion is performed with the exact same library (`node-html-markdown`) and the same content-type handling as `mcp-searxng`'s `web_url_read`, so the output is familiar and faithful.
-
 Built on [Bun](https://bun.sh) — the package manager, test runner, and runtime.
 
 ---
