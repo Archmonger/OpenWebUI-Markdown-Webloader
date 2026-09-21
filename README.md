@@ -29,7 +29,7 @@ docker run -d \
   --name openwebui-markdown-webloader \
   -p 14786:14786 \
   -e API_KEY=your-secret-key \
-  ghcr.io/ARCHMONGER/openwebui-markdown-webloader:latest
+  ghcr.io/archmonger/openwebui-markdown-webloader:latest
 ```
 
 ### Docker Compose
@@ -37,7 +37,7 @@ docker run -d \
 ```yaml
 services:
   web-loader:
-    image: ghcr.io/ARCHMONGER/openwebui-markdown-webloader:latest
+    image: ghcr.io/archmonger/openwebui-markdown-webloader:latest
     container_name: openwebui-markdown-webloader
     restart: unless-stopped
     ports:
