@@ -106,6 +106,28 @@ describe("POST / (Open-WebUI external loader contract)", () => {
     expect(body.length).toBe(1);
     expect(body[0].metadata.source).toBe(`${fixtureBase}/html`);
   });
+
+  test.each([404, 410, 403])(
+    "surfaces upstream %i instead of an empty 200 when every URL fails",
+    async (upstream) => {
+      const res = await post("/", {
+        urls: [`${fixtureBase}/status/${upstream}`],
+      });
+      expect(res.status).toBe(upstream);
+      const body = (await res.json()) as any;
+      expect(body.error).toBe("server");
+      expect(String(body.message)).toContain(String(upstream));
+    },
+  );
+
+  test("returns an empty 200 for a URL that yields empty content (not an upstream error)", async () => {
+    // The empty-content case is a genuine "no document" outcome, not an
+    // upstream error, so it is NOT surfaced as a non-2xx - only true upstream
+    // HTTP failures cause the aggregate error to be raised.
+    const res = await post("/", { urls: [`${fixtureBase}/empty`] });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as any[]).toEqual([]);
+  });
 });
 
 describe("POST /load", () => {
@@ -198,12 +220,48 @@ describe("POST /load content-type handling", () => {
     const res = await post("/load", { url: `${fixtureBase}/error500` });
     expect(res.status).toBe(502);
   });
+
   test("an oversized body is rejected by the size limit", async () => {
     const res = await post("/load", { url: `${fixtureBase}/big` });
     expect(res.status).toBe(422);
     const body = (await res.json()) as any;
     expect(/too large|exceeds/i.test(body.message)).toBe(true);
   });
+});
+
+describe("POST /load upstream status-code forwarding", () => {
+  test.each([
+    // 4xx client errors are forwarded verbatim so the caller sees the real
+    // upstream failure (e.g. a 404 for a missing page, a 410 for a removed
+    // resource, a 403 for access-control, 429 for rate limiting).
+    [400, 400],
+    [401, 401],
+    [403, 403],
+    [404, 404],
+    [410, 410],
+    [418, 418],
+    [429, 429],
+    // 5xx upstream errors are mapped to 502 (Bad Gateway) because the engine
+    // is acting as a gateway to the upstream server.
+    [500, 502],
+    [502, 502],
+    [503, 502],
+    [504, 502],
+  ] as Array<[number, number]>)(
+    "upstream %i is surfaced as %i",
+    async (upstream, expected) => {
+      const res = await post("/load", {
+        url: `${fixtureBase}/status/${upstream}`,
+        options: { noCache: true },
+      });
+      const body = (await res.json()) as any;
+      expect(res.status).toBe(expected);
+      // Non-2xx responses carry an error body rather than a markdown payload.
+      expect(body.error).toBeDefined();
+      expect(body.message).toBeDefined();
+      expect(String(body.message)).toContain(String(upstream));
+    },
+  );
 });
 
 describe("POST /load/batch", () => {

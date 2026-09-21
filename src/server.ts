@@ -176,6 +176,13 @@ export function createServer(config: AppConfig): ServerHandle {
           }
           const options = resolveOptions(request.headers, body as any);
           const results: OpenWebUIDocument[] = [];
+          // Track the first *upstream* failure so a total-failure batch does not
+          // silently masquerade as a successful `200 []` (which Open-WebUI
+          // cannot distinguish from "the page genuinely has no content"). A
+          // content-derived outcome (empty page, unsupported type, etc.) is a
+          // successful fetch that yielded no document, and is NOT treated as an
+          // upstream HTTP failure.
+          let firstUpstreamError: EngineError | undefined;
           // Process in small concurrent groups to bound resource use.
           for (let i = 0; i < urls.length; i += config.maxConcurrentUrls) {
             const group = urls.slice(i, i + config.maxConcurrentUrls);
@@ -194,9 +201,19 @@ export function createServer(config: AppConfig): ServerHandle {
                   };
                   if (result.title) doc.metadata.title = result.title;
                   return doc;
-                } catch {
-                  // Continue on failure: silently skip, matching Open-WebUI's
-                  // ExternalWebLoader continue_on_failure semantics.
+                } catch (error) {
+                  // Continue on failure: skip failed URLs so a partial success
+                  // still returns the documents that loaded (Open-WebUI's
+                  // ExternalWebLoader continue_on_failure semantics). Only a
+                  // genuine upstream HTTP error (type "server") is retained so
+                  // an all-failed batch can surface the real status code.
+                  if (
+                    error instanceof EngineError &&
+                    error.type === "server" &&
+                    !firstUpstreamError
+                  ) {
+                    firstUpstreamError = error;
+                  }
                   return null;
                 }
               }),
@@ -204,6 +221,15 @@ export function createServer(config: AppConfig): ServerHandle {
             for (const doc of settled) {
               if (doc) results.push(doc);
             }
+          }
+          // If every URL failed with an upstream HTTP error, surface that
+          // status instead of an empty 200 so callers (and Open-WebUI) see the
+          // real failure reason (e.g. a 404).
+          if (results.length === 0 && firstUpstreamError) {
+            return json(firstUpstreamError.status, {
+              error: firstUpstreamError.type,
+              message: firstUpstreamError.message,
+            });
           }
           return json(200, results);
         }

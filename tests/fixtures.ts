@@ -185,6 +185,17 @@ export function startFixture(port: number) {
           },
         });
       }
+      // Dynamic status route: /status/<code> returns that HTTP status with a
+      // small body, so tests can verify how the engine forwards response codes.
+      const statusMatch = /^\/status\/(\d{3})$/.exec(p);
+      if (statusMatch) {
+        const code = Number.parseInt(statusMatch[1], 10);
+        const body = `status=${code}`;
+        return new Response(body, {
+          status: code,
+          headers: { "content-type": "text/plain" },
+        });
+      }
       return new Response("not found", { status: 404 });
     },
   });
