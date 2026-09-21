@@ -163,7 +163,7 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 | `PROXY_URL` / `NO_PROXY` | – | Egress proxy config (undici `ProxyAgent`) |
 | `LOG_LEVEL` | `info` | `off` \| `error` \| `warn` \| `info` \| `debug` |
 
-## How it converts content (matching `web_url_read`)
+## How it converts content
 
 | Content-Type | Output |
 |--------------|--------|
@@ -182,7 +182,3 @@ bun run lint        # biome check src tests
 bun test            # 83 unit + integration tests (bun test)
 bun run tests/smoke.ts   # end-to-end smoke against a local fixture
 ```
-
-## License
-
-[MIT](LICENSE)
