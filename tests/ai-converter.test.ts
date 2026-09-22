@@ -5,6 +5,7 @@ import {
   aiShouldAttempt,
   aiConvertHtml,
   maybeAiConvert,
+  stripOuterCodeFence,
 } from "../src/ai-converter.js";
 import { readUrl, cacheKeyFor, aiCacheKeyFor } from "../src/url-reader.js";
 import { SimpleCache } from "../src/cache.js";
@@ -59,8 +60,10 @@ function makeStub(
       if (mode === "bad_type") {
         return Response.json({ markdown: 12345 });
       }
+      // ReaderLM wraps its output in a ```markdown fence; mirror that so the
+      // loader's unwrap is exercised end-to-end via readUrl.
       return Response.json({
-        markdown: "# AI Generated\n\nConverted by ReaderLM.",
+        markdown: "```markdown\n# AI Generated\n\nConverted by ReaderLM.\n```",
         tokens: 42,
         model: "ReaderLM-v2",
         latency_ms: 12.3,
@@ -126,6 +129,42 @@ describe("AI config defaults", () => {
     const cfg = loadConfig(baseEnv({ AI_CONVERTER_ENABLED: "1" }));
     expect(cfg.ai.enabled).toBe(true);
     expect(cfg.ai.fallbackOnError).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stripOuterCodeFence: unwrap the ```markdown fence ReaderLM wraps output in.
+// ---------------------------------------------------------------------------
+describe("stripOuterCodeFence", () => {
+  test("unwraps a ```markdown fenced document", () => {
+    const input = "```markdown\n# Title\n\nBody text.\n```";
+    expect(stripOuterCodeFence(input)).toBe("# Title\n\nBody text.");
+  });
+  test("unwraps a bare ``` fenced document", () => {
+    const input = "```\nhello\n```";
+    expect(stripOuterCodeFence(input)).toBe("hello");
+  });
+  test("leaves plain markdown untouched", () => {
+    const input = "# Title\n\nBody text.";
+    expect(stripOuterCodeFence(input)).toBe(input);
+  });
+  test("preserves an inline code block inside a non-fenced document", () => {
+    const input = "Some text with `code` and more.";
+    expect(stripOuterCodeFence(input)).toBe(input);
+  });
+  test("does not strip when there is no closing fence", () => {
+    const input = "```markdown\nnot closed";
+    expect(stripOuterCodeFence(input)).toBe(input);
+  });
+  test("preserves a fenced block that contains another fence", () => {
+    const input = "```\nfoo\n`bar`\n```";
+    expect(stripOuterCodeFence(input)).toBe("foo\n`bar`");
+  });
+  test("leaves a fence whose opening line is not a bare tag alone", () => {
+    // Pathological: opener line has real content mixed with the fence; be safe.
+    const input = "```markdown this is content```";
+    // starts + ends with ``` but no newline -> treated as not a real fence block.
+    expect(stripOuterCodeFence(input)).toBe(input);
   });
 });
 

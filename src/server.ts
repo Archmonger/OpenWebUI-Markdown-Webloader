@@ -83,6 +83,9 @@ export function createServer(config: AppConfig): ServerHandle {
       if (result.title) response.title = result.title;
       if (result.images?.length) response.images = result.images;
       if (result.links?.length) response.links = result.links;
+      // Surface which renderer produced the markdown (native / ai / fallback)
+      // so callers can see AI provenance; absent for non-HTML and legacy cache.
+      if (result.converter) response.metadata.converter = result.converter;
       return response;
     } catch (error) {
       if (error instanceof EngineError) throw error;
@@ -213,6 +216,9 @@ export function createServer(config: AppConfig): ServerHandle {
                     metadata: { source: target },
                   };
                   if (result.title) doc.metadata.title = result.title;
+                  // Additive AI provenance; Open-WebUI ignores unknown keys.
+                  if (result.converter)
+                    doc.metadata.converter = result.converter;
                   return doc;
                 } catch (error) {
                   // Continue on failure: skip failed URLs so a partial success

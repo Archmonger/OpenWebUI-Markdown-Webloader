@@ -28,12 +28,32 @@ Ada with the CUDA 13 driver:
 # Build args (defaults; shown explicitly):
 AI_PYTHON_BUILDER_DEPS="olive-ai onnxruntime-genai-cuda"
 AI_PYTHON_DEPENDENCIES="onnxruntime-genai-cuda==0.16.0 onnxruntime-gpu==1.30.0 numpy"
-AI_LINUX_PACKAGES="libgomp1 ca-certificates"
+# The CUDA runtime libraries must come from the NVIDIA apt repo (see below).
+AI_CUDA_REPO_DISTRO="debian13"
+AI_LINUX_PACKAGES="cuda-cudart-13-4 libcublas-13-4 libcudnn9-cuda-13 libcufft-13-4 libcurand-13-4"
 AI_BUILDER_ARGS="-o /build/model -p int4 -e cuda --extra_options use_paged_attention=true paged_block_size=256 gpu_utilization_factor=0.8"
 
 # Runtime overlay (sidecar default):
 AI_RUNTIME_CFG='{"model":{"decoder":{"session_options":{"provider_options":[{"cuda":{"enable_cuda_graph":"1"}}]}}},"engine":{"dynamic_batching":{"gpu_utilization_factor":0.5}}}'
 ```
+
+**CUDA runtime libraries (a real gotcha, now handled):** `onnxruntime-genai-cuda`
+0.16 links against `libcublasLt.so.13`, `libcudnn.so.9`, `libcufft.so.12`, and
+`libcurand.so.10` at load time but does **not** bundle them (the CUDA-13 wheel
+omits them and the plain `onnxruntime-gpu` does too). They must be installed from
+the NVIDIA apt repo — that is exactly what `AI_CUDA_REPO_DISTRO` +
+`AI_LINUX_PACKAGES` default to. Without them the sidecar dies at startup with:
+`Cuda interface not available: Failed to load library: libcublasLt.so.13`.
+The runtime image adds the NVIDIA Debian repo (via NVIDIA's `cuda-keyring`),
+installs the five runtime libs, and runs `ldconfig` so the SONAMEs resolve. The
+host still needs the NVIDIA driver + `nvidia-container-toolkit` (that is a host
+concern, not baked into the image).
+
+> **ARG-quoting:** multi-word `ARG` defaults MUST be quoted (`ARG X="a b c"`).
+> The legacy (non-BuildKit) `docker build` truncates an unquoted multi-word
+> default to its first token (`"a b c"` -> `"a"`), which silently drops every
+> package but the first. Quoting fixes both builders; users overriding via
+> `--build-arg` are unaffected.
 
 **Why these values (all validated):**
 

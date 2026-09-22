@@ -43,6 +43,38 @@ export function getLastAiModel(): string | undefined {
 }
 
 /**
+ * Strip a single outer Markdown code fence that the model wrapped the whole
+ * document in. ReaderLM-v2 frequently returns the result as:
+ *
+ *     ```markdown
+ *     <actual markdown>
+ *     ```
+ *
+ * The native converter returns raw Markdown, so we unwrap the fence to keep the
+ * two paths consistent. This is deliberately conservative: it only removes the
+ * fence when the trimmed text both starts and ends with ``` and the opening line
+ * is a plain language tag (or empty). Anything else is returned untouched so we
+ * never corrupt content that merely happens to contain triple backticks.
+ */
+export function stripOuterCodeFence(md: string): string {
+  const trimmed = md.trim();
+  if (!trimmed.startsWith("```") || !trimmed.endsWith("```")) return md;
+  // Need at least an opener line and a closer (i.e. more than just the fences).
+  const inner = trimmed.slice(3, -3);
+  const nl = inner.indexOf("\n");
+  // No newline after the opener means it is not a real fenced block; leave it.
+  if (nl === -1) return md;
+  const openLine = inner.slice(0, nl).trim();
+  // If the opening line is a bare language tag (markdown, html, or empty),
+  // drop it and return the body. Otherwise the opener line is real content and
+  // we must not have mis-detected — leave the document as-is.
+  if (/^[a-z0-9_+-]*$/i.test(openLine)) {
+    return inner.slice(nl + 1).trimEnd();
+  }
+  return md;
+}
+
+/**
  * Decide whether a given HTML document should be routed through the AI
  * converter, given the resolved request options and server config. Kept pure so
  * it is trivially unit-testable and so the request path stays readable.
@@ -111,9 +143,14 @@ export async function aiConvertHtml(
     if (typeof data.markdown !== "string" || data.markdown.trim() === "") {
       return { ok: false, reason: "AI converter returned empty markdown" };
     }
+    const cleanMarkdown = stripOuterCodeFence(data.markdown);
+    if (cleanMarkdown.trim() === "") {
+      // The "output" was only a fence wrapper with nothing inside.
+      return { ok: false, reason: "AI converter returned empty markdown" };
+    }
     return {
       ok: true,
-      markdown: data.markdown,
+      markdown: cleanMarkdown,
       tokens: typeof data.tokens === "number" ? data.tokens : 0,
       model: typeof data.model === "string" ? data.model : "readerlm",
       latencyMs:

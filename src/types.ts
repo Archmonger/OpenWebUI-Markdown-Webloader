@@ -139,6 +139,12 @@ export interface OpenWebUIDocument {
   metadata: {
     source: string;
     title?: string;
+    /**
+     * Which converter produced the markdown (native / ai / fallback). Additive
+     * and optional: Open-WebUI ignores unknown metadata keys, so exposing this
+     * is safe and gives downstream consumers AI provenance.
+     */
+    converter?: ConverterKind;
   };
 }
 

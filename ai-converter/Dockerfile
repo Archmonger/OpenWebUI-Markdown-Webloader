@@ -39,11 +39,15 @@ ARG AI_MODEL_SOURCE=jinaai/ReaderLM-v2
 # `-o /build/model` so the runtime stage can copy a stable path. Keep the rest of
 # the validated recipe: int4 weights + paged attention to kill the dense-mask
 # prefill spike and enable continuous batching.
-ARG AI_BUILDER_ARGS=-o /build/model -p int4 -e cuda --extra_options use_paged_attention=true paged_block_size=256 gpu_utilization_factor=0.8
+# NOTE: multi-word ARG defaults MUST be quoted. The legacy (non-BuildKit) builder
+# truncates an unquoted multi-word default to its first token (e.g. "a b c" ->
+# "a"). Quoting makes the default expand correctly under both the legacy builder
+# and BuildKit. Users overriding via --build-arg are unaffected.
+ARG AI_BUILDER_ARGS="-o /build/model -p int4 -e cuda --extra_options use_paged_attention=true paged_block_size=256 gpu_utilization_factor=0.8"
 # Heavy build-only deps (torch/olive live only in this discarded stage). Use the
 # CUDA genai package (NOT plain `onnxruntime-genai`, which conflicts) so the
 # `-e cuda` builder provider is available.
-ARG AI_PYTHON_BUILDER_DEPS=olive-ai onnxruntime-genai-cuda
+ARG AI_PYTHON_BUILDER_DEPS="olive-ai onnxruntime-genai-cuda"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
@@ -63,15 +67,35 @@ RUN set -eux; \
 ############ runtime ############
 FROM python:${AI_PYTHON_VERSION}-slim AS runtime
 
-# Runtime OS packages. The CUDA/cuDNN libs come from the pip wheels, so only a
-# few shims are needed on slim. Override per-vendor if required.
-ARG AI_LINUX_PACKAGES=libgomp1 ca-certificates
+# NVIDIA CUDA repo distro used to source the CUDA *runtime* libraries. The CUDA-13
+# `onnxruntime-genai-cuda` wheel links against libcublasLt.so.13 / libcudnn.so.9
+# / libcufft / libcurand at runtime but does NOT bundle them, so they must come
+# from the NVIDIA apt repo (this is the validated setup). Set this to an empty
+# string to skip the repo add (e.g. a CPU-only or non-NVIDIA vendor build).
+ARG AI_CUDA_REPO_DISTRO=debian13
+# OS-level packages installed at runtime. The default is the exact set of CUDA-13
+# runtime libraries validated for the paged int4 model. libgomp1 (ORT OpenMP) is
+# installed unconditionally below. Override for a different CUDA point-release or
+# vendor. (Quoted — see the ARG-truncation note in the builder stage.)
+ARG AI_LINUX_PACKAGES="cuda-cudart-13-4 libcublas-13-4 libcudnn9-cuda-13 libcufft-13-4 libcurand-13-4"
 # Runtime Python deps. Keep pinned to the validated set for reproducibility.
-ARG AI_PYTHON_DEPENDENCIES=onnxruntime-genai-cuda==0.16.0 onnxruntime-gpu==1.30.0 numpy
+ARG AI_PYTHON_DEPENDENCIES="onnxruntime-genai-cuda==0.16.0 onnxruntime-gpu==1.30.0 numpy"
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ${AI_LINUX_PACKAGES} \
-    && rm -rf /var/lib/apt/lists/*
+# Add the NVIDIA CUDA apt repo (unless disabled) and install the CUDA runtime libs
+# + shims. Keyring is NVIDIA's published cuda-keyring package.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg libgomp1; \
+    if [ -n "${AI_CUDA_REPO_DISTRO}" ]; then \
+        curl -fsSL "https://developer.download.nvidia.com/compute/cuda/repos/${AI_CUDA_REPO_DISTRO}/x86_64/cuda-keyring_1.1-1_all.deb" \
+            -o /tmp/cuda-keyring.deb; \
+        dpkg -i /tmp/cuda-keyring.deb; \
+        rm /tmp/cuda-keyring.deb; \
+        apt-get update; \
+    fi; \
+    apt-get install -y --no-install-recommends ${AI_LINUX_PACKAGES}; \
+    ldconfig; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir ${AI_PYTHON_DEPENDENCIES}
 

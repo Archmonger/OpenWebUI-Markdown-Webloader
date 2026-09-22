@@ -270,7 +270,7 @@ Approximate single-stream throughput: prefill ~8k tok/s, decode ~150–180 tok/s
 bun install
 bun run typecheck   # tsc --noEmit
 bun run lint        # biome check src tests
-bun test            # 129 unit + integration tests (bun test)
+bun test            # 136 unit + integration tests (bun test)
 bun run tests/smoke.ts   # end-to-end smoke against a local fixture
 ```
 
