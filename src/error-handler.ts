@@ -81,10 +81,14 @@ export function createContentError(message: string, url: string): EngineError {
   return new EngineError("content", `${message} (${url})`, 422);
 }
 
-export function createConversionError(url: string): EngineError {
+export function createConversionError(
+  url: string,
+  detail?: string,
+): EngineError {
+  const suffix = detail ? ` Reason: ${detail}` : "";
   return new EngineError(
     "conversion",
-    `Failed to convert the fetched content of ${url} to Markdown.`,
+    `Failed to convert the fetched content of ${url} to Markdown.${suffix}`,
     500,
   );
 }

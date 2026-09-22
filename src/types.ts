@@ -53,6 +53,15 @@ export interface LoadOptions {
   withImages: boolean;
   /** Include a links list in the response (markdown/html only). */
   withLinks: boolean;
+  /**
+   * Per-request AI-conversion intent. Tri-state:
+   *  - `undefined` (default): follow the server-wide `AI_CONVERTER_ENABLED`.
+   *  - `false`: force this request through the native converter even if the
+   *    server-wide switch is on (per-document opt-out).
+   * A request can never force AI *on* when the operator has not enabled the
+   * feature globally, because the sidecar would not be provisioned.
+   */
+  aiConvert: boolean | undefined;
 }
 
 /** Resolved options after merging per-request overrides with the defaults. */
@@ -87,10 +96,19 @@ export interface LinkInfo {
   text?: string;
 }
 
+/** Which renderer produced a markdown document. */
+export type ConverterKind = "native" | "ai" | "fallback";
+
 export interface ResponseMetadata {
   processingTimeMs: number;
   cached: boolean;
   byteLength: number;
+  /**
+   * Which converter produced the markdown. Absent on non-HTML and on cached
+   * entries that predate this field. `fallback` means the AI converter was
+   * requested but failed and the native renderer produced the output.
+   */
+  converter?: ConverterKind;
 }
 
 /** Response for `POST /load`. */
@@ -133,5 +151,13 @@ export interface HealthResponse {
     maxContentLengthBytes: number;
     maxPdfPages: number;
     requestTimeoutMs: number;
+  };
+  /** AI converter feature status (never includes the auth token). */
+  converter: {
+    ai_enabled: boolean;
+    ai_service_url?: string;
+    ai_fallback_on_error?: boolean;
+    /** Model name reported by the sidecar on the most recent successful ping. */
+    ai_model?: string;
   };
 }

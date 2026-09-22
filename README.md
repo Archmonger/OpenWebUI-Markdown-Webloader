@@ -138,6 +138,7 @@ curl http://localhost:14786/health
 | `x-remove-selector` | CSS selector | (reserved) remove matching elements |
 | `x-with-images-summary` | `true` | Include an image list in `/load` |
 | `x-with-links-summary` | `true` | Include a link list in `/load` |
+| `x-ai-convert` | `0` / `false` | Per-request **opt-out** of AI conversion (see below). Only meaningful when the AI feature is enabled server-wide. |
 
 ## Configuration
 
@@ -167,11 +168,101 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 
 | Content-Type | Output |
 |--------------|--------|
-| `text/html`, `application/xhtml+xml` | Markdown (`node-html-markdown`) |
+| `text/html`, `application/xhtml+xml` | Markdown (`node-html-markdown`, or **AI** if enabled) |
 | `application/json`, `*+json` | Pretty-printed `json` fence |
 | `text/*`, `+xml`, `yaml`, `toml` | Fenced block tagged with the language |
 | `application/pdf` | Extracted text in a `text` fence (no OCR) |
 | binary / media / archives | Rejected with an explanatory message |
+
+## Optional: AI Markdown Conversion (opt-in)
+
+By default the loader is a **pure, dependency-free** converter: HTML is rendered
+with `node-html-markdown` and nothing AI-related is installed, contacted, or
+required. This is the behavior unless you explicitly opt in.
+
+When enabled, **HTML** documents (and only HTML — JSON/PDF/text/etc. always use
+the native path) are routed to an optional [ReaderLM-v2](https://huggingface.co/jinaai/ReaderLM-v2)
+GPU sidecar for a higher-quality, LLM-grade Markdown conversion. The sidecar is a
+separate container because it needs the Python `onnxruntime-genai` runtime, which
+cannot live inside the Bun process. The loader talks to it over HTTP and **always
+falls back** to `node-html-markdown` if the sidecar is slow, erroring, or
+unreachable — so enabling the feature never breaks loading.
+
+### Enabling it
+
+```bash
+# 1. Point the loader at the sidecar and turn the feature on:
+export AI_CONVERTER_ENABLED=1
+export AI_SERVICE_URL=http://ai-converter:8090
+# (optional) shared secret between loader and sidecar:
+export AI_CONVERTER_TOKEN=***
+
+# 2. Start BOTH the loader and the sidecar via the `ai` compose profile:
+docker compose --profile ai up -d
+```
+
+Without `--profile ai` the sidecar never starts and `AI_CONVERTER_ENABLED` is
+irrelevant — you get the pure native loader. The `.env` default is `0` (off).
+
+### How it behaves
+
+- **HTML only.** Non-HTML content is never sent to the model.
+- **Size window.** Documents outside `AI_MIN_HTML_CHARS`..`AI_MAX_HTML_CHARS`
+  are rendered natively, protecting VRAM and latency.
+- **Graceful fallback.** Any sidecar failure returns the native rendering and
+  marks `metadata.converter = "fallback"` instead of erroring (unless you set
+  `AI_FALLBACK_ON_ERROR=0`).
+- **Cache lanes.** AI output is cached under a separate `ai:` key so it never
+  shadows the native rendering of the same URL, and vice versa. A `fallback`
+  result is **not** cached, so a later request retries the AI once the service
+  recovers.
+- **Provenance.** Every response's `metadata.converter` reports `"native"`,
+  `"ai"`, or `"fallback"` so you can see what produced the output.
+
+### Per-request control
+
+Send `x-ai-convert: 0` (or body `{"options": {"aiConvert": false}}`) to force a
+single request through the native converter even when the feature is globally on
+(a per-document opt-out). A request can never force the AI *on* when the
+operator has not enabled it server-wide.
+
+### AI environment variables
+
+Loader-side (all read by the Bun engine). Defaults reproduce the validated test
+setup; `AI_CONVERTER_ENABLED` is the master switch and is **off** by default.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AI_CONVERTER_ENABLED` | `0` | Master on/off switch for the AI path |
+| `AI_SERVICE_URL` | `http://localhost:8090` | Sidecar base URL (use `ai-converter` in compose) |
+| `AI_CONVERTER_TOKEN` | – | Shared bearer token with the sidecar |
+| `AI_CONVERT_TIMEOUT_MS` | `30000` | Loader→sidecar timeout; exceed ⇒ fallback |
+| `AI_FALLBACK_ON_ERROR` | `1` | Fall back to native on any AI error |
+| `AI_MAX_NEW_TOKENS` | `8192` | Model output token cap |
+| `AI_TEMPERATURE` | `0.0` | `0` ⇒ greedy/deterministic (validated) |
+| `AI_TOP_K` | `1` | Nucleus/top-k (used only if temperature > 0) |
+| `AI_TOP_P` | `1.0` | Nucleus sampling (used only if temperature > 0) |
+| `AI_SEED` | – | RNG seed (≥ 0); no effect under greedy |
+| `AI_MIN_HTML_CHARS` | `1` | Don't AI-route smaller docs |
+| `AI_MAX_HTML_CHARS` | `2000000` | Don't AI-route larger docs |
+| `AI_CACHE_OUTPUT` | `1` | Cache AI output under the `ai:` lane |
+
+Sidecar-side and build-time variables (see [`ai-converter/README-vendors.md`](ai-converter/README-vendors.md)) let you retarget other GPU vendors — `AI_BUILDER_ARGS`, `AI_PYTHON_DEPENDENCIES`, `AI_LINUX_PACKAGES`, and the `AI_RUNTIME_CFG` overlay.
+
+### The validated configuration
+
+The default sidecar settings are the ones validated end-to-end on a 16 GB RTX
+2000 Ada with CUDA 13:
+
+- **Weights:** int4 (memory-bandwidth bound; ~80% of the fp ceiling at ⅓ the VRAM).
+- **Attention:** paged attention (`use_paged_attention=true`) — eliminates the
+  dense attention-mask prefill spike and enables the continuous-batching engine.
+- **CUDA graphs:** enabled at runtime for a ~5% decode speedup.
+- **Utilization factor:** `0.5` at runtime so CUDA-graph capture buffers aren't
+  starved on a shared GPU.
+- **Decoding:** greedy (temperature 0) for faithful, deterministic markdown.
+
+Approximate single-stream throughput: prefill ~8k tok/s, decode ~150–180 tok/s.
 
 ## Development
 
@@ -179,6 +270,13 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 bun install
 bun run typecheck   # tsc --noEmit
 bun run lint        # biome check src tests
-bun test            # 83 unit + integration tests (bun test)
+bun test            # 129 unit + integration tests (bun test)
 bun run tests/smoke.ts   # end-to-end smoke against a local fixture
+```
+
+The optional AI sidecar has its own GPU-free tests (they stub
+`onnxruntime_genai`), runnable anywhere Python 3 is present:
+
+```bash
+cd ai-converter && python3 -m unittest discover -v
 ```

@@ -1,12 +1,16 @@
 # OpenWebUI-Markdown-Webloader
 # Run the markdown web loader next to a self-hosted OpenWebUI instance.
 #
-#   docker compose up -d
+#   docker compose up -d                     # AI OFF (default): loader only
+#   docker compose --profile ai up -d        # AI ON: loader + ReaderLM sidecar
 #
 # Then point OpenWebUI at it (Admin -> Settings -> Web Loader):
 #   EXTERNAL_WEB_LOADER_URL = http://web-loader:14786
 #   EXTERNAL_WEB_LOADER_API_KEY = the API_KEY set below
 #
+# The AI converter is entirely opt-in. Without `--profile ai` the sidecar is not
+# started, no GPU is needed, and `AI_CONVERTER_ENABLED` stays false so the loader
+# behaves exactly as before.
 services:
   web-loader:
     image: ghcr.io/ARCHMONGER/openwebui-markdown-webloader:latest
@@ -37,9 +41,79 @@ services:
       # NO_PROXY: localhost,127.0.0.1
       # Logging
       LOG_LEVEL: info
+
+      # --- AI markdown conversion (OPTIONAL) ---
+      # Only takes effect if you also start the `ai-converter` service
+      # (`--profile ai`). Leave this false to keep the pure-native loader.
+      AI_CONVERTER_ENABLED: ${AI_CONVERTER_ENABLED:-false}
+      # Reach the sidecar by its compose service name.
+      AI_SERVICE_URL: ${AI_SERVICE_URL:-http://ai-converter:8090}
+      # Shared secret between loader and sidecar (keep in sync via AI_CONVERTER_TOKEN).
+      AI_CONVERTER_TOKEN: ${AI_CONVERTER_TOKEN:-}
+      # Loader->sidecar timeout; on exceed it falls back to native markdown.
+      AI_CONVERT_TIMEOUT_MS: ${AI_CONVERT_TIMEOUT_MS:-30000}
+      # Fall back to node-html-markdown if the sidecar errors (recommended true).
+      AI_FALLBACK_ON_ERROR: ${AI_FALLBACK_ON_ERROR:-true}
+      # Generation controls (defaults = greedy, the validated ReaderLM recipe).
+      AI_MAX_NEW_TOKENS: ${AI_MAX_NEW_TOKENS:-8192}
+      AI_TEMPERATURE: ${AI_TEMPERATURE:-0.0}
+      AI_TOP_K: ${AI_TOP_K:-1}
+      AI_TOP_P: ${AI_TOP_P:-1.0}
+      # Only route documents within these size bounds to the AI path.
+      AI_MIN_HTML_CHARS: ${AI_MIN_HTML_CHARS:-1}
+      AI_MAX_HTML_CHARS: ${AI_MAX_HTML_CHARS:-2000000}
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:14786/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 5s
+
+  # -----------------------------------------------------------------------
+  # AI converter sidecar (ReaderLM-v2). Only started with `--profile ai`.
+  # Requires the NVIDIA container runtime (NVIDIA_VISIBLE_DEVICES + runtime).
+  # For other vendors change the runtime/device keys and build the image with
+  # the matching AI_* build args (see ai-converter/Dockerfile).
+  # -----------------------------------------------------------------------
+  ai-converter:
+    profiles: ["ai"]
+    image: ghcr.io/ARCHMONGER/openwebui-markdown-webloader-ai:latest
+    build:
+      context: ./ai-converter
+      # Vendor-tunable build args (validated NVIDIA/CUDA defaults shown).
+      # args:
+      #   AI_BUILDER_ARGS: "-o /build/model -p int4 -e cuda --extra_options use_paged_attention=true paged_block_size=256 gpu_utilization_factor=0.8"
+      #   AI_PYTHON_DEPENDENCIES: "onnxruntime-genai-cuda==0.16.0 onnxruntime-gpu==1.30.0 numpy"
+      #   AI_LINUX_PACKAGES: "libgomp1 ca-certificates"
+    container_name: openwebui-ai-converter
+    restart: unless-stopped
+    # NVIDIA GPU passthrough. For AMD, use the AMD container toolkit instead.
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      AI_HOST: 0.0.0.0
+      AI_PORT: "8090"
+      AI_MODEL_NAME: ${AI_MODEL_NAME:-ReaderLM-v2}
+      # Must match the loader's AI_CONVERTER_TOKEN when one is used.
+      AI_CONVERTER_TOKEN: ${AI_CONVERTER_TOKEN:-}
+      # Runtime overlay (JSON) forwarded to the builder-provided genai config.
+      # When unset, the sidecar uses its own validated default (CUDA graph
+      # capture + gpu_utilization_factor=0.5). To customize — e.g. for a
+      # non-NVIDIA vendor or to disable graphs — set AI_RUNTIME_CFG in .env.
+      # See ai-converter/README-vendors.md for per-vendor examples.
+      AI_RUNTIME_CFG: ${AI_RUNTIME_CFG:-}
+    ports:
+      # Optional host-publish for direct testing/debugging. The loader always
+      # reaches the sidecar over the internal service name + container port
+      # (8090), so this mapping is independent of the loader. Remove if you do
+      # not want the sidecar reachable from the host network.
+      - "${AI_HOST_PORT:-8090}:8090"
+    healthcheck:
+      # Shared probe script (no shell/JSON newline escaping needed).
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 4
+      # Model load + CUDA graph capture on first boot can take a couple minutes.
+      start_period: 180s

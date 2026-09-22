@@ -28,6 +28,7 @@ import type {
 import { EngineError } from "./error-handler.js";
 import { resolveOptions } from "./options.js";
 import { readUrl, type UrlReadResult } from "./url-reader.js";
+import { getLastAiModel } from "./ai-converter.js";
 import { SimpleCache } from "./cache.js";
 
 const VERSION = "0.1.0";
@@ -58,7 +59,7 @@ export function createServer(config: AppConfig): ServerHandle {
         "access-control-allow-origin": "*",
         "access-control-allow-methods": "POST,GET,OPTIONS",
         "access-control-allow-headers":
-          "content-type,authorization,x-respond-with,x-no-cache,x-target-selector,x-remove-selector,x-wait-for-selector,x-timeout,x-user-agent,x-proxy-url,x-with-images-summary,x-with-links-summary",
+          "content-type,authorization,x-respond-with,x-no-cache,x-target-selector,x-remove-selector,x-wait-for-selector,x-timeout,x-user-agent,x-proxy-url,x-with-images-summary,x-with-links-summary,x-ai-convert",
       },
     });
 
@@ -122,13 +123,24 @@ export function createServer(config: AppConfig): ServerHandle {
             "access-control-allow-origin": "*",
             "access-control-allow-methods": "POST,GET,OPTIONS",
             "access-control-allow-headers":
-              "content-type,authorization,x-respond-with,x-no-cache,x-target-selector,x-remove-selector,x-wait-for-selector,x-timeout,x-user-agent,x-proxy-url,x-with-images-summary,x-with-links-summary",
+              "content-type,authorization,x-respond-with,x-no-cache,x-target-selector,x-remove-selector,x-wait-for-selector,x-timeout,x-user-agent,x-proxy-url,x-with-images-summary,x-with-links-summary,x-ai-convert",
           },
         });
       }
 
       // /health is public.
       if (path === "/health" && method === "GET") {
+        const converter: HealthResponse["converter"] = {
+          ai_enabled: config.ai.enabled,
+        };
+        if (config.ai.enabled) {
+          converter.ai_service_url = config.ai.serviceUrl;
+          converter.ai_fallback_on_error = config.ai.fallbackOnError;
+          // Populated after the first successful conversion; not fetched here
+          // so /health never depends on the sidecar being reachable.
+          const model = getLastAiModel();
+          if (model) converter.ai_model = model;
+        }
         const body: HealthResponse = {
           status: "ok",
           version: VERSION,
@@ -139,6 +151,7 @@ export function createServer(config: AppConfig): ServerHandle {
             maxPdfPages: config.maxPdfPages,
             requestTimeoutMs: config.requestTimeoutMs,
           },
+          converter,
         };
         return json(200, body);
       }
