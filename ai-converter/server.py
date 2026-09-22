@@ -74,6 +74,14 @@ RUNTIME_CFG = _raw_cfg if _raw_cfg.strip() else DEFAULT_RUNTIME_CFG
 HOST = os.environ.get("AI_HOST", "0.0.0.0")
 PORT = int(os.environ.get("AI_PORT", "8090"))
 TOKEN = os.environ.get("AI_CONVERTER_TOKEN") or None
+# Soft cap on queued conversions. Because the GPU is serialized behind one owner
+# thread, a request flood would otherwise grow the queue without bound and keep
+# burning GPU cycles on documents whose client has already timed out (the loader
+# aborts after AI_CONVERT_TIMEOUT_MS but the queued turn would still run). When
+# the queue is at/over this depth we return 503 `busy`, which the loader treats
+# as an AI failure and falls back to native — graceful overload shedding. qsize()
+# is approximate under concurrency but sufficient as a soft bound.
+MAX_QUEUE = int(os.environ.get("AI_MAX_QUEUE", "50"))
 SYSTEM_PROMPT = os.environ.get(
     "AI_SYSTEM_PROMPT", "Convert the HTML to Markdown. Output only the Markdown."
 )
@@ -212,8 +220,19 @@ def _owner_loop():
             done.set()
 
 
+# Raised when the GPU queue is saturated and we are shedding load rather than
+# queueing an unbounded backlog of requests whose clients may already be gone.
+class ServerBusy(Exception):
+    pass
+
+
 # Public entry used by the HTTP layer: enqueue a conversion and block for it.
 def convert(html, max_new_tokens, temperature, top_k, top_p, seed):
+    # Overload shedding: if too many conversions are already queued, refuse this
+    # one (503) instead of growing the backlog. The loader treats 503 as an AI
+    # failure and falls back to the native renderer, so this degrades gracefully.
+    if _WORK_QUEUE.qsize() >= MAX_QUEUE:
+        raise ServerBusy(f"queue full ({MAX_QUEUE} pending)")
     result = {}
     done = threading.Event()
     kwargs = {
@@ -227,6 +246,8 @@ def convert(html, max_new_tokens, temperature, top_k, top_p, seed):
     _WORK_QUEUE.put((kwargs, result, done))
     # Block with a generous ceiling; the client-side timeout bounds UX.
     done.wait(timeout=600)
+    if not done.is_set():
+        raise RuntimeError("conversion timed out waiting for the engine")
     if "error" in result:
         raise RuntimeError(result["error"])
     if "value" not in result:
@@ -301,6 +322,11 @@ class Handler(BaseHTTPRequestHandler):
                 float(payload.get("top_p", 1.0)),
                 payload.get("seed"),
             )
+        except ServerBusy as exc:
+            # Load-shed rather than build an unbounded GPU backlog. The loader
+            # treats any non-2xx as an AI failure and falls back to native.
+            self._send(503, {"error": "busy", "message": str(exc)})
+            return
         except Exception as exc:  # Surface as 500 so the loader falls back.
             self._send(500, {"error": "convert_failed", "message": str(exc)})
             return

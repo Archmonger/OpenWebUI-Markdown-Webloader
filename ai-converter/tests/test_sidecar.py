@@ -308,6 +308,33 @@ class SidecarContractTest(unittest.TestCase):
         # It is valid JSON (the sidecar validates before applying).
         json.loads(cfg.overlays[0])
 
+    def test_queue_saturation_sheds(self):
+        # With the queue at/over the cap, convert() must raise ServerBusy instead
+        # of growing the backlog. Owner thread is intentionally NOT started here,
+        # so the one queued dummy never drains.
+        srv = _load_server(AI_MAX_QUEUE="1")
+        # Do NOT call _start_sidecar (owner would drain). Just queue one dummy.
+        srv._WORK_QUEUE.put(({}, {}, threading.Event()))
+        self.assertEqual(srv.MAX_QUEUE, 1)
+        self.assertGreaterEqual(srv._WORK_QUEUE.qsize(), 1)
+        with self.assertRaises(srv.ServerBusy):
+            srv.convert("<p>x</p>", 10, 0.0, 1, 1.0, None)
+
+    def test_busy_maps_to_503(self):
+        # End-to-end through the handler: a full queue returns HTTP 503 busy.
+        srv = _load_server(AI_MAX_QUEUE="0")
+        # Start a *paused* owner so readiness gating passes but nothing drains.
+        # Easiest: pre-set readiness, fill the queue, hit the endpoint.
+        srv._READY.set()
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        self.addCleanup(lambda: (httpd.shutdown(), httpd.server_close()))
+        status, body = _http_json(port, "POST", "/convert", {"html": "<b>x</b>"})
+        self.assertEqual(status, 503)
+        self.assertEqual(body.get("error"), "busy")
+
     def test_load_failure_marks_health_error(self):
         # Simulate a model load failure: the owner thread records the error and
         # sets READY; health then reports 503 and convert refuses with 503.
