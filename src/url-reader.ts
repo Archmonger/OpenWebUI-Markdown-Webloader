@@ -27,6 +27,7 @@ import type {
   ResolvedOptions,
 } from "./types.js";
 import { aiShouldAttempt, maybeAiConvert } from "./ai-converter.js";
+import { preprocessHtml } from "./preprocess.js";
 import {
   createContentError,
   createConversionError,
@@ -541,8 +542,16 @@ async function convertResponse(
  * Convert an HTML document to Markdown, preferring the AI (ReaderLM) converter
  * when enabled for this request, and always falling back to the native
  * `node-html-markdown` renderer. Metadata (title/images/links) is always taken
- * from the raw HTML via the native extractors so it is present regardless of
+ * from the RAW HTML via the native extractors so it is present regardless of
  * which renderer produced the body text.
+ *
+ * When `PREPROCESS_HTML` is enabled (default), the document is first run
+ * through the `dom_smoothie` Readability cleaner and BOTH renderers consume the
+ * cleaned HTML. This keeps the two paths comparable and gives the model a
+ * smaller, article-only input. The cleaner never loses content: if it fails or
+ * is unavailable it returns the original HTML, so the conversion still runs.
+ * The AI size gate is evaluated against the CLEANED length, which is what the
+ * model will actually be sent.
  */
 async function convertHtmlContent(
   html: string,
@@ -550,10 +559,18 @@ async function convertHtmlContent(
   options: ResolvedOptions,
   config: AppConfig,
 ): Promise<ConvertedContent> {
+  // Metadata from the RAW document so titles/images/links are never lost even
+  // if Readability drops them during cleaning.
   const meta = nativeHtmlMetadata(html);
-  const nativeMarkdown = renderNativeHtmlMarkdown(html, url);
 
-  if (!aiShouldAttempt(config, options, html.length)) {
+  // Pre-clean once; shared by the native and AI paths. Falls back to `html`.
+  const cleaned = await preprocessHtml(html, url, config, (level, msg) =>
+    log(config, level === "warn" ? "info" : level, msg),
+  );
+
+  const nativeMarkdown = renderNativeHtmlMarkdown(cleaned, url);
+
+  if (!aiShouldAttempt(config, options, cleaned.length)) {
     return {
       kind: "markdown",
       markdown: nativeMarkdown,
@@ -562,7 +579,7 @@ async function convertHtmlContent(
     };
   }
   const { markdown, converter } = await maybeAiConvert(
-    html,
+    cleaned,
     nativeMarkdown,
     url,
     config,

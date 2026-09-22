@@ -43,11 +43,48 @@ export interface AppConfig {
   /** Log level: off | error | warn | info | debug. */
   logLevel: "off" | "error" | "warn" | "info" | "debug";
   /**
+   * Readability-style HTML pre-cleaning (dom_smoothie). When enabled, every
+   * HTML document is stripped of navigation/header/footer boilerplate via the
+   * `dom_smoothie_cli` binary BEFORE it reaches either converter. This makes
+   * the native `node-html-markdown` output more article-focused and shrinks
+   * what the AI sidecar must prefill. Applied to BOTH the native and AI paths.
+   * Defaults to ON; the step degrades gracefully to the raw HTML if the binary
+   * is missing, errors, times out, or yields empty output.
+   */
+  preprocess: PreprocessConfig;
+  /**
    * Optional AI markdown converter (ReaderLM-v2 sidecar). Disabled unless
    * `AI_CONVERTER_ENABLED` is truthy; when disabled the engine behaves exactly
    * as before and performs no calls to any AI service.
    */
   ai: AiConverterConfig;
+}
+
+/**
+ * Configuration for the optional HTML pre-cleaner (dom_smoothie, a Rust
+ * Readability port). The cleaner runs as a small external binary that the Bun
+ * loader shells out to; the request path never hard-depends on it because a
+ * failure to run it simply uses the original HTML. See `src/preprocess.ts`.
+ */
+export interface PreprocessConfig {
+  /** Master switch (`PREPROCESS_HTML`). Default true. */
+  enabled: boolean;
+  /** Path to the `dom_smoothie_cli` binary (`PREPROCESS_BINARY`). */
+  binaryPath: string;
+  /** Hard per-document timeout in ms (`PREPROCESS_TIMEOUT_MS`). */
+  timeoutMs: number;
+  /**
+   * Maximum DOM elements the cleaner will process (`PREPROCESS_MAX_ELEMENTS`).
+   * 0 means no limit (matches the binary default). A positive value bounds
+   * worst-case CPU on pathological documents.
+   */
+  maxElements: number;
+  /**
+   * Only preprocess documents at least this many characters
+   * (`PREPROCESS_MIN_CHARS`). Skips tiny documents where the subprocess cost
+   * outweighs the benefit.
+   */
+  minChars: number;
 }
 
 /**
@@ -159,8 +196,36 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxConcurrentUrls: readInt(env, "MAX_CONCURRENT_URLS", 10),
     maxBatchUrls: readInt(env, "MAX_BATCH_URLS", 100),
     logLevel: readLogLevel(env),
+    preprocess: loadPreprocessConfig(env),
     ai: loadAiConfig(env),
   };
+}
+
+/**
+ * Read the HTML pre-cleaner sub-config. On by default: pre-cleaning is a
+ * low-risk, high-value step (it always has the raw HTML to fall back to), so
+ * operators opt OUT (`PREPROCESS_HTML=0`) rather than in.
+ */
+function loadPreprocessConfig(env: NodeJS.ProcessEnv): PreprocessConfig {
+  return {
+    enabled: readBool(env, "PREPROCESS_HTML", true),
+    binaryPath: env.PREPROCESS_BINARY?.trim() || "dom_smoothie_cli",
+    timeoutMs: readInt(env, "PREPROCESS_TIMEOUT_MS", 3_000),
+    // maxElements intentionally allows 0 (= unlimited), so readInt's
+    // "<=0 -> fallback" rule cannot express it; parse directly.
+    maxElements: parseNonNegativeInt(env.PREPROCESS_MAX_ELEMENTS, 0),
+    minChars: readInt(env, "PREPROCESS_MIN_CHARS", 800),
+  };
+}
+
+/** Parse a non-negative integer, falling back on invalid/missing input. */
+function parseNonNegativeInt(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isNaN(parsed) || parsed < 0 ? fallback : parsed;
 }
 
 /**
