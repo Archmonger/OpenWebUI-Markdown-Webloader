@@ -284,12 +284,15 @@ class SidecarContractTest(unittest.TestCase):
         self.assertEqual(status, 404)
 
     def test_default_overlay_is_the_proven_default(self):
-        # When AI_RUNTIME_CFG is unset/empty, the proven NVIDIA default applies.
+        # When AI_RUNTIME_CFG is unset/empty, the built-in NVIDIA default applies:
+        # CUDA graph capture + a high gpu_utilization_factor (0.9) that sizes the
+        # paged-KV pool as large as the card allows. Lower via AI_RUNTIME_CFG if
+        # you share the GPU or hit capture failures/OOM.
         srv = _load_server(AI_RUNTIME_CFG="")
         cfg = json.loads(srv.RUNTIME_CFG)
         provider = cfg["model"]["decoder"]["session_options"]["provider_options"][0]
         self.assertEqual(provider["cuda"]["enable_cuda_graph"], "1")
-        self.assertEqual(cfg["engine"]["dynamic_batching"]["gpu_utilization_factor"], 0.5)
+        self.assertEqual(cfg["engine"]["dynamic_batching"]["gpu_utilization_factor"], 0.9)
 
     def test_custom_overlay_passthrough(self):
         custom = json.dumps(

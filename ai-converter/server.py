@@ -51,11 +51,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # --------------------------------------------------------------------------
 MODEL_DIR = os.environ.get("AI_MODEL_DIR", "/models")
 
-# Proven NVIDIA default overlay: CUDA graph capture (≈5% faster decode) plus a
-# conservative gpu_utilization_factor so graph-capture buffers are not starved on
-# a shared GPU. Used when AI_RUNTIME_CFG is unset OR empty (a set-but-empty string
-# must NOT silently disable the validated default and fall back to the model's
-# baked-in enable_cuda_graph=0).
+# Default NVIDIA overlay: CUDA graph capture (≈5% faster decode) plus a
+# high gpu_utilization_factor (0.9) so the paged-KV pool is as large as the
+# card allows, maximizing how big a document can be converted before it becomes
+# unserviceable. Used when AI_RUNTIME_CFG is unset OR empty (a set-but-empty
+# string must NOT silently disable the validated default and fall back to the
+# model's baked-in enable_cuda_graph=0).
+#
+# Tuning note: 0.9 leaves ~10% of VRAM as headroom. This was verified on the
+# 16 GB RTX 2000 Ada with CUDA graphs enabled: a 0.92 factor loaded the model
+# and captured graphs without failure, using ~15.5 GB. If you share the GPU with
+# other CUDA-graph workloads or hit CUDA-graph capture failures / OOM, lower
+# this (e.g. 0.5–0.8) via AI_RUNTIME_CFG.
 DEFAULT_RUNTIME_CFG = json.dumps(
     {
         "model": {
@@ -65,7 +72,7 @@ DEFAULT_RUNTIME_CFG = json.dumps(
                 }
             }
         },
-        "engine": {"dynamic_batching": {"gpu_utilization_factor": 0.5}},
+        "engine": {"dynamic_batching": {"gpu_utilization_factor": 0.9}},
     }
 )
 _raw_cfg = os.environ.get("AI_RUNTIME_CFG", "")
