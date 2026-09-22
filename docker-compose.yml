@@ -42,6 +42,22 @@ services:
       # Logging
       LOG_LEVEL: info
 
+      # --- HTML pre-cleaning (Readability via dom_smoothie) ---
+      # ON by default: every HTML doc is stripped of nav/header/footer
+      # boilerplate before BOTH the native and AI renderers see it. Degrades
+      # to the raw HTML if the (bundled, static) cleaner ever fails, so it is
+      # safe to leave on. Set to 0 to feed raw HTML to both paths.
+      PREPROCESS_HTML: ${PREPROCESS_HTML:-1}
+      # Per-document timeout for the cleaner (ms). Falls back to raw HTML past
+      # this. Bundled binary needs ~10-80ms per typical page.
+      PREPROCESS_TIMEOUT_MS: ${PREPROCESS_TIMEOUT_MS:-3000}
+      # Skip documents smaller than this many chars (subprocess not worth it).
+      PREPROCESS_MIN_CHARS: ${PREPROCESS_MIN_CHARS:-800}
+      # Cap DOM elements processed (0 = unlimited). Bounds worst-case CPU.
+      PREPROCESS_MAX_ELEMENTS: ${PREPROCESS_MAX_ELEMENTS:-0}
+      # Override the binary path if not using the bundled one on PATH.
+      # PREPROCESS_BINARY: /usr/local/bin/dom_smoothie_cli
+
       # --- AI markdown conversion (OPTIONAL) ---
       # Only takes effect if you also start the `ai-converter` service
       # (`--profile ai`). Leave this false to keep the pure-native loader.
@@ -99,7 +115,7 @@ services:
       AI_CONVERTER_TOKEN: ${AI_CONVERTER_TOKEN:-}
       # Runtime overlay (JSON) forwarded to the builder-provided genai config.
       # When unset, the sidecar uses its own validated default (CUDA graph
-      # capture + gpu_utilization_factor=0.5). To customize — e.g. for a
+      # capture + gpu_utilization_factor=0.9). To customize — e.g. for a
       # non-NVIDIA vendor or to disable graphs — set AI_RUNTIME_CFG in .env.
       # See ai-converter/README-vendors.md for per-vendor examples.
       AI_RUNTIME_CFG: ${AI_RUNTIME_CFG:-}

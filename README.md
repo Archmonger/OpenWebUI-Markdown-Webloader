@@ -12,6 +12,7 @@ Built on [Bun](https://bun.sh) — the package manager, test runner, and runtime
 
 - **Open-WebUI compatible** — speaks the exact `ExternalWebLoader` contract (`POST /` with `{"urls":[...]}` → `[{page_content, metadata}]`), so it plugs straight into Open-WebUI's `EXTERNAL_WEB_LOADER_URL`.
 - **Markdown, not HTML** — HTML/XHTML → Markdown via `node-html-markdown`; JSON → pretty-printed `json` fence; XML/YAML/TOML/plain text → fenced blocks; PDFs → extracted text.
+- **Readability pre-cleaning (on by default)** — every HTML page is first stripped of navigation/header/footer boilerplate with [`dom_smoothie`](https://github.com/niklak/dom_smoothie) (a Rust port of Mozilla Readability) before it reaches *either* renderer, so both the native and AI paths get focused, article-only content. Fully optional and self-healing (falls back to raw HTML). See [HTML pre-cleaning](#html-pre-cleaning-readability).
 - **Content-type aware** — JSON is pretty-printed, structured text is fenced with the right language, binary/media/archive downloads are intentionally rejected (with an explanatory message).
 - **SSRF protection** — rejects private/loopback/link-local/multicast and IPv6 ULA addresses, plus a DNS-rebinding guard that re-validates every resolved address. Cloud-metadata (`169.254.169.254`) and internal-only fetches are blocked by default.
 - **Safety limits** — 5 MB body cap (configurable), binary NUL-byte sniffing of the first 1 KiB, PDF page-count and text-size caps, request timeouts, and redirect-loop protection.
@@ -163,6 +164,11 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 | `ALLOW_PRIVATE_URLS` | `false` | **Disable SSRF protection — never on a public server** |
 | `PROXY_URL` / `NO_PROXY` | – | Egress proxy config (undici `ProxyAgent`) |
 | `LOG_LEVEL` | `info` | `off` \| `error` \| `warn` \| `info` \| `debug` |
+| `PREPROCESS_HTML` | `1` | **On by default** — Readability pre-clean HTML before both renderers |
+| `PREPROCESS_TIMEOUT_MS` | `3000` | Per-document cleaner timeout; exceed ⇒ raw HTML |
+| `PREPROCESS_MIN_CHARS` | `800` | Skip documents smaller than this |
+| `PREPROCESS_MAX_ELEMENTS` | `0` | Cap DOM elements cleaned (`0` = unlimited) |
+| `PREPROCESS_BINARY` | `dom_smoothie_cli` | Path to the cleaner binary (bundled on PATH) |
 
 ## How it converts content
 
@@ -173,6 +179,39 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 | `text/*`, `+xml`, `yaml`, `toml` | Fenced block tagged with the language |
 | `application/pdf` | Extracted text in a `text` fence (no OCR) |
 | binary / media / archives | Rejected with an explanatory message |
+
+## HTML pre-cleaning (Readability)
+
+When `PREPROCESS_HTML` is enabled (the default), every HTML document is run
+through [`dom_smoothie_cli`](https://github.com/niklak/dom_smoothie) — a Rust
+port of Mozilla *Readability* — **before** it reaches any renderer. This drops
+navigation menus, headers, footers, sidebars, and other page chrome so that:
+
+- the **native** `node-html-markdown` path produces a cleaner, article-focused
+  document, and
+- the **AI** path prefills far fewer tokens (a large page was ~40% smaller
+  input after cleaning) with the article body, headings, tables, code, and links
+  preserved.
+
+The step runs as a small **statically-linked** binary bundled in the image, so it
+adds no runtime libraries. It is **safe by construction**: if the binary is ever
+missing, exits non-zero, times out (`PREPROCESS_TIMEOUT_MS`), or produces empty
+output, the loader silently falls back to the **original HTML** and the
+conversion still completes. Turn it off entirely with `PREPROCESS_HTML=0` to feed
+raw HTML to both paths.
+
+> **Which HTML reaches the model?** With pre-cleaning on, the AI size window
+> (`AI_MIN_HTML_CHARS`..`AI_MAX_HTML_CHARS`) and the model itself see the
+> *cleaned* HTML. Document *metadata* (title, image/link lists) is still
+> extracted from the raw HTML so nothing is lost when chrome is dropped.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PREPROCESS_HTML` | `1` | Master switch. `0` disables cleaning for both paths |
+| `PREPROCESS_TIMEOUT_MS` | `3000` | Kill the cleaner past this; use raw HTML |
+| `PREPROCESS_MIN_CHARS` | `800` | Don't clean documents shorter than this |
+| `PREPROCESS_MAX_ELEMENTS` | `0` | Bound DOM elements processed (`0` = no cap) |
+| `PREPROCESS_BINARY` | `dom_smoothie_cli` | Binary path (bundled on PATH) |
 
 ## Optional: AI Markdown Conversion (opt-in)
 
@@ -258,8 +297,10 @@ The default sidecar settings are the ones validated end-to-end on a 16 GB RTX
 - **Attention:** paged attention (`use_paged_attention=true`) — eliminates the
   dense attention-mask prefill spike and enables the continuous-batching engine.
 - **CUDA graphs:** enabled at runtime for a ~5% decode speedup.
-- **Utilization factor:** `0.5` at runtime so CUDA-graph capture buffers aren't
-  starved on a shared GPU.
+- **Utilization factor:** `0.9` at runtime (`gpu_utilization_factor`) to size the
+  paged-KV pool as large as the card allows, maximizing the biggest document
+  that can be converted. Lower it (0.5–0.8) via `AI_RUNTIME_CFG` if you share
+  the GPU with other CUDA-graph workloads or hit capture failures / OOM.
 - **Decoding:** greedy (temperature 0) for faithful, deterministic markdown.
 
 Approximate single-stream throughput: prefill ~8k tok/s, decode ~150–180 tok/s.
@@ -272,6 +313,13 @@ bun run typecheck   # tsc --noEmit
 bun run lint        # biome check src tests
 bun test            # unit + integration tests (bun test)
 bun run tests/smoke.ts   # end-to-end smoke against a local fixture
+```
+
+The optional HTML pre-cleaner's real-binary integration test is skipped unless
+you point it at a built `dom_smoothie_cli`:
+
+```bash
+PREPROCESS_TEST_BINARY=/path/to/dom_smoothie_cli bun test tests/preprocess.test.ts
 ```
 
 The optional AI sidecar has its own GPU-free tests (they stub

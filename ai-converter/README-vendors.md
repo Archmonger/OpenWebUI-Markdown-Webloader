@@ -1,114 +1,126 @@
 # AI Converter — Vendor / GPU configuration
 
-This document covers how to retarget the optional AI converter sidecar to a
-different GPU vendor (or CPU) than the validated NVIDIA/CUDA setup. Everything is
-driven by Docker **build args** and a runtime **overlay JSON** — no code changes.
+The optional AI converter sidecar is **only** built and run when you opt into AI
+markdown conversion. This guide shows how to retarget it to a different vendor
+(or CPU). Everything is controlled by Docker **build args** plus a runtime
+**overlay JSON** — no code changes for the supported paths.
 
-The two knobs that matter most:
+> The **Bun loader itself is vendor-agnostic**: it only makes HTTP calls to the
+> sidecar. All GPU/vendor concerns live entirely in `ai-converter/`. Adding a
+> vendor never requires changing the loader.
 
-- **`AI_PYTHON_DEPENDENCIES`** / **`AI_PYTHON_BUILDER_DEPS`** — which
-  `onnxruntime-genai` wheel (CPU / CUDA / DirectML) gets installed, plus its
-  CUDA/accelerator wheels.
-- **`AI_RUNTIME_CFG`** — the JSON overlay merged into the sidecar's
-  `onnxruntime_genai.Config` (execution-provider options, CUDA graphs, batching).
-  This is a passthrough, so any valid genai config key works here.
-- **`AI_BUILDER_ARGS`** — the `-e <provider>` selects the builder execution
-  provider and `-p <quant>` selects quantization. Must include `-o /build/model`.
+## The knobs that matter
 
-> **Default = the validated NVIDIA setup.** If you change none of these, you get
-> int4 + paged attention + CUDA graphs on NVIDIA GPUs. To use a different vendor,
-> override the values shown below for that vendor.
+| Knob | Where | What it selects |
+|------|-------|-----------------|
+| `AI_PYTHON_DEPENDENCIES` | build | The `onnxruntime-genai` wheel installed at **runtime** (CPU / CUDA / DirectML) plus its accelerator wheels. |
+| `AI_PYTHON_BUILDER_DEPS` | build | Build-time deps (`olive-ai` + the matching genai package for the `-e` provider). |
+| `AI_BUILDER_ARGS` | build | `-e <provider>` picks the builder execution provider; `-p <quant>` picks quantization. Must include `-o /build/model`. |
+| `AI_RUNTIME_CFG` | runtime | JSON merged into the sidecar's `onnxruntime_genai` config (execution-provider options, CUDA graphs, batching). A passthrough — any valid genai key works. |
 
-## Validated reference (NVIDIA / CUDA)
+**Default = the validated NVIDIA/CUDA setup.** If you change none of these you
+get int4 + paged attention + CUDA graphs + `gpu_utilization_factor=0.9` on
+NVIDIA. To use a different vendor, override the values below.
 
-This is what ships as the default and what was benchmarked on a 16 GB RTX 2000
-Ada with the CUDA 13 driver:
+## Validated default (NVIDIA / CUDA)
+
+Benchmarked end-to-end on a 16 GB RTX 2000 Ada (CUDA 13 driver). These are the
+image defaults — shown explicitly:
 
 ```bash
-# Build args (defaults; shown explicitly):
 AI_PYTHON_BUILDER_DEPS="olive-ai onnxruntime-genai-cuda"
 AI_PYTHON_DEPENDENCIES="onnxruntime-genai-cuda==0.16.0 onnxruntime-gpu==1.30.0 numpy"
-# The CUDA runtime libraries must come from the NVIDIA apt repo (see below).
 AI_CUDA_REPO_DISTRO="debian13"
 AI_LINUX_PACKAGES="cuda-cudart-13-4 libcublas-13-4 libcudnn9-cuda-13 libcufft-13-4 libcurand-13-4"
 AI_BUILDER_ARGS="-o /build/model -p int4 -e cuda --extra_options use_paged_attention=true paged_block_size=256 gpu_utilization_factor=0.8"
-
-# Runtime overlay (sidecar default):
-AI_RUNTIME_CFG='{"model":{"decoder":{"session_options":{"provider_options":[{"cuda":{"enable_cuda_graph":"1"}}]}}},"engine":{"dynamic_batching":{"gpu_utilization_factor":0.5}}}'
+AI_RUNTIME_CFG='{"model":{"decoder":{"session_options":{"provider_options":[{"cuda":{"enable_cuda_graph":"1"}}]}}},"engine":{"dynamic_batching":{"gpu_utilization_factor":0.9}}}'
 ```
 
-**CUDA runtime libraries (a real gotcha, now handled):** `onnxruntime-genai-cuda`
-0.16 links against `libcublasLt.so.13`, `libcudnn.so.9`, `libcufft.so.12`, and
-`libcurand.so.10` at load time but does **not** bundle them (the CUDA-13 wheel
-omits them and the plain `onnxruntime-gpu` does too). They must be installed from
-the NVIDIA apt repo — that is exactly what `AI_CUDA_REPO_DISTRO` +
-`AI_LINUX_PACKAGES` default to. Without them the sidecar dies at startup with:
-`Cuda interface not available: Failed to load library: libcublasLt.so.13`.
-The runtime image adds the NVIDIA Debian repo (via NVIDIA's `cuda-keyring`),
-installs the five runtime libs, and runs `ldconfig` so the SONAMEs resolve. The
-host still needs the NVIDIA driver + `nvidia-container-toolkit` (that is a host
-concern, not baked into the image).
+Notes on the defaults:
 
-> **ARG-quoting:** multi-word `ARG` defaults MUST be quoted (`ARG X="a b c"`).
-> The legacy (non-BuildKit) `docker build` truncates an unquoted multi-word
-> default to its first token (`"a b c"` -> `"a"`), which silently drops every
-> package but the first. Quoting fixes both builders; users overriding via
-> `--build-arg` are unaffected.
+- **`gpu_utilization_factor=0.9` (runtime)** sizes the paged-KV pool as large as
+  the card allows, so the biggest possible document can be converted. It leaves
+  ~10% of VRAM as headroom (verified: a 0.92 factor loads the model and
+  captures CUDA graphs on the 16 GB card, using ~15.5 GB). If you share the GPU
+  with other CUDA-graph workloads or hit graph-capture failures / OOM, lower it
+  (0.5–0.8) via `AI_RUNTIME_CFG`.
+- The CUDA **runtime** libraries come from the NVIDIA apt repo
+  (`AI_CUDA_REPO_DISTRO` + `AI_LINUX_PACKAGES`); the wheels don't bundle them.
+  The host still needs the NVIDIA driver + `nvidia-container-toolkit`.
+- Greedy decoding (`AI_TEMPERATURE=0`) is the faithful, deterministic recipe for
+  a conversion model.
+- **ARG-quoting:** multi-word `--build-arg` values must be quoted
+  (`--build-arg X="a b c"`); an unquoted value is truncated to its first token by
+  some builders.
 
-**Why these values (all validated):**
+## Vendor support matrix
 
-- **int4 weights (`-p int4`)** — the model is memory-bandwidth bound; int4
-  reaches ~80% of the float decode speed at ~⅓ the VRAM.
-- **`use_paged_attention=true`** — the single most important setting. The dense
-  `attention_mask` in a non-paged build caused a ~9.4 GB prefill spike; paged
-  attention replaces it with a fixed block pool and also enables the
-  continuous-batching `Engine` API.
-- **`enable_cuda_graph=1`** (runtime) — ~5% decode speedup by cutting kernel
-  launch overhead.
-- **`gpu_utilization_factor=0.5`** (runtime, NOT 0.8 as at build) — 0.8
-  over-reserved the pool and starved CUDA-graph capture buffers on a shared card,
-  causing `ENGINE_EXECUTION_FAILURE` at higher batch sizes. 0.5 is the safe
-  runtime value.
-- **Greedy decoding (`temperature=0`)** — ReaderLM-v2 is a conversion model, not
-  a chat model; greedy is faithful and deterministic.
+| Vendor / accelerator | Provider | How | Status |
+|----------------------|----------|-----|--------|
+| NVIDIA discrete | CUDA (`-e cuda`, `onnxruntime-genai-cuda`) | Build-args + runtime overlay (default) | **Validated** |
+| Any CPU (Intel/AMD) | CPU (`-e cpu`, plain `onnxruntime-genai`) | Build-args + runtime overlay only | **Works (env-only)** |
+| Intel Arc / Core iGPU | OpenVINO | Separate `openvino-genai` stack — **source change** | Not wired (see below) |
+| AMD Ryzen AI NPU (Strix) | AMD Ryzen AI (AIE/Vitis-AI) | Vendor artifacts + **source/runtime change** | Not wired |
+| AMD Radeon discrete (Linux) | (ROCm — not a genai EP) | No packaged OGA path | **Unsupported** |
+| AMD/Intel on Windows | DirectML (`-e dml`, `onnxruntime-genai-directml`) | Different OS; not a Linux container | Out of scope |
 
-### Gotchas learned during validation
-
-- The `libcufft` SONAME stays `12` even under CUDA 13 (from the cu12 pip
-  wheels) — harmless, but do not be surprised if you see `libcufft.so.12`.
-- The `nvidia-*-cu12` pip wheels bundle their own CUDA/cuDNN, so the runtime
-  image does **not** need a system CUDA toolkit — only the host driver +
-  `nvidia-container-toolkit`.
-- If you later want KV-cache int8 (`int8_per_token`), the built `PagedAttention`
-  node emits 19 inputs while the ORT 1.30 schema caps at 17; that path needs a
-  version-matched ORT and is **not** enabled in the default.
-
-## AMD GPUs
-
-First-class Linux GPU support for this pipeline via `onnxruntime-genai` is limited.
-Two practical options:
-
-**A. Intel/AMD CPU path (portable, no discrete-GPU driver needed).**
+### CPU path (Intel or AMD CPU) — env-only, works today
 
 ```bash
-AI_PYTHON_DEPENDENCIES="onnxruntime-genai==0.16.0 numpy"
 AI_PYTHON_BUILDER_DEPS="olive-ai onnxruntime-genai"
+AI_PYTHON_DEPENDENCIES="onnxruntime-genai==0.16.0 numpy"
 AI_BUILDER_ARGS="-o /build/model -p int4 -e cpu --extra_options use_paged_attention=true"
 AI_RUNTIME_CFG='{"model":{"decoder":{"session_options":{"providers":["CPUExecutionProvider"]}}}}'
+AI_CUDA_REPO_DISTRO=""          # no NVIDIA apt repo
+AI_LINUX_PACKAGES="libgomp1"    # OpenMP only
 ```
 
-Drop the `runtime: nvidia` / `NVIDIA_*` keys from the compose `ai-converter`
-service and run it as a normal container. Expect roughly CPU throughput (slower
-than GPU but fully functional).
+Then **remove the NVIDIA keys** from the compose `ai-converter` service
+(`runtime: nvidia`, `NVIDIA_VISIBLE_DEVICES`, `NVIDIA_DRIVER_CAPABILITIES`) and
+run it as a normal container. Expect CPU throughput — functional but slower than
+GPU.
 
-**B. OpenVINO (Intel Arc / iGPU / AMD via OpenVINO EP).**
+## Supporting Intel & AMD GPUs (what changes are needed)
 
-OpenVINO is a separate runtime (`openvino.genai`), not a drop-in wheel swap for
-this sidecar. Adapting to it is a larger change than the env knobs cover; treat it
-as "not currently wired" and prefer the CPU path or NVIDIA for now.
+**Loader:** none. The Bun loader does not know or care which GPU the sidecar uses
+— no loader env vars change for a different vendor.
 
-> **DirectML** (`onnxruntime-genai-directml`) targets Windows/DirectX and is not a
-> supported Linux-container GPU path for this project.
+Everything below is in the **sidecar** (`ai-converter/`):
+
+1. **Pick the execution provider** — set `-e <provider>` in `AI_BUILDER_ARGS`
+   and the matching wheels in `AI_PYTHON_DEPENDENCIES` /
+   `AI_PYTHON_BUILDER_DEPS`.
+
+2. **Provider packaging reality** (this is the limiting factor):
+   - **CPU** and **CUDA** have ready-made PyPI wheels
+     (`onnxruntime-genai`, `onnxruntime-genai-cuda`) → env-only, no code change.
+   - **OpenVINO** (Intel Arc / iGPU) and **AMD** accelerators are **not** drop-in
+     `onnxruntime-genai` wheels. Intel's supported route is the separate
+     **`openvino-genai`** library (`openvino.genai.LLM`), whose API differs from
+     `onnxruntime_genai`'s `Model`/`Engine`. AMD's supported accelerators are
+     the **Ryzen AI** NPU stack. Neither can be reached by swapping the wheel
+     string in this sidecar as written.
+
+3. **Source change required for Intel/AMD GPU.** To use OpenVINO or a Ryzen AI
+   NPU you must adapt `ai-converter/server.py` to that runtime's API
+   (`openvino.genai` or the AMD flow) — a different model-load + generate loop
+   than the current `onnxruntime_genai` `Engine`. In practice this is a
+   **vendor-specific sidecar image** rather than a value in `AI_RUNTIME_CFG`.
+   (AMD Radeon on Linux has **no** onnxruntime-genai provider at all; DirectML
+   works only on Windows/DirectX, not in this Linux container.)
+
+4. **Container runtime / device passthrough** — a deployment change, not env in
+   the loader:
+   - NVIDIA: `runtime: nvidia` + `NVIDIA_*` (current default).
+   - Intel Arc/iGPU: mount the GPU (`/dev/dri`) into the container and install
+     the Intel compute/OneAPI runtime in the image.
+   - AMD: use the AMD container toolkit / device passthrough for the chosen flow.
+
+**Bottom line:** CPU on Intel/AMD is a pure env swap (above). GPU acceleration on
+Intel Arc or AMD is **not achievable by environment variables alone** in the
+current sidecar — it needs a source-level port to that vendor's runtime plus the
+matching base image and device passthrough. The existing knobs were designed for
+the CUDA wheel family; a second vendor means a second sidecar build target.
 
 ## Verifying the sidecar without a client
 
@@ -135,6 +147,6 @@ docker build ./ai-converter \
   -t my-org/webloader-ai:<vendor>
 ```
 
-The model build step runs on CPU regardless of provider, so you can build the
-image on a GPU-less build host; only **running** it needs the target accelerator
-(plus the matching container runtime for GPU passthrough).
+The model-build step runs on CPU regardless of provider, so the image can be
+built on a GPU-less host; only **running** it needs the target accelerator (plus
+the matching container runtime for passthrough).
