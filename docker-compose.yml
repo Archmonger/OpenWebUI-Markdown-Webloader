@@ -71,7 +71,7 @@ services:
 
   # -----------------------------------------------------------------------
   # AI converter sidecar (ReaderLM-v2). Only started with `--profile ai`.
-  # Requires the NVIDIA container runtime (NVIDIA_VISIBLE_DEVICES + runtime).
+  # Defaults to an NVIDIA GPU environment (NVIDIA_VISIBLE_DEVICES + runtime).
   # For other vendors change the runtime/device keys and build the image with
   # the matching AI_* build args (see ai-converter/Dockerfile).
   # -----------------------------------------------------------------------
