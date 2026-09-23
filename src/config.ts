@@ -85,6 +85,38 @@ export interface PreprocessConfig {
    * outweighs the benefit.
    */
   minChars: number;
+  /**
+   * Optional post-clean HTML minification. See {@link MinifyConfig} and
+   * `src/minify.ts`. Defaults to OFF (opt-in via `PREPROCESS_MINIFY_HTML`): it
+   * only changes the bytes handed to the AI sidecar and never the native
+   * renderer output.
+   */
+  minify: MinifyConfig;
+}
+
+/**
+ * Configuration for the optional HTML minifier (`@minify-html/node`), a fast
+ * C++ minifier run on the Readability-cleaned HTML before it is handed to the
+ * AI sidecar. It exists to shrink the model's input: ReaderLM's prefill cost
+ * grows super-linearly with sequence length, so cutting ~10% off a large
+ * document measurably cuts prefill latency (measured: ~19% on a 572 KB page).
+ *
+ * Two invariants are baked in (see `src/minify.ts`):
+ *   1. The minifier's SAFE option set is always used (`keep_closing_tags` and
+ *      `keep_comments` are forced true). The package's defaults drop optional
+ *      closing tags, and `node-html-markdown`'s structure parsing relies on
+ *      them — the defaults would silently corrupt tables into blockquotes.
+ *      The minifier is a native addon that may be absent or incompatible, so
+ *      the step is off by default and, when on, degrades to the unminified HTML
+ *      if the addon cannot be loaded or throws. It can never break a request +
+ *      converter; at worst you get a slightly larger AI input.
+ *   2. It is applied to the AI-path input only. The native `node-html-markdown`
+ *      path keeps consuming the unminified cleaned HTML, so enabling this can
+ *      never change the markdown a native (non-AI) deployment serves.
+ */
+export interface MinifyConfig {
+  /** Master switch (`PREPROCESS_MINIFY_HTML`). Default false (opt-in). */
+  enabled: boolean;
 }
 
 /**
@@ -215,6 +247,9 @@ function loadPreprocessConfig(env: NodeJS.ProcessEnv): PreprocessConfig {
     // "<=0 -> fallback" rule cannot express it; parse directly.
     maxElements: parseNonNegativeInt(env.PREPROCESS_MAX_ELEMENTS, 0),
     minChars: readInt(env, "PREPROCESS_MIN_CHARS", 800),
+    // Opt-in (default off): minify only shrinks the AI input and is a native
+    // addon, so it is off unless the operator enables it. See src/minify.ts.
+    minify: { enabled: readBool(env, "PREPROCESS_MINIFY_HTML", false) },
   };
 }
 

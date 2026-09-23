@@ -169,6 +169,7 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 | `PREPROCESS_MIN_CHARS` | `800` | Skip documents smaller than this |
 | `PREPROCESS_MAX_ELEMENTS` | `0` | Cap DOM elements cleaned (`0` = unlimited) |
 | `PREPROCESS_BINARY` | `dom_smoothie_cli` | Path to the cleaner binary (bundled on PATH) |
+| `PREPROCESS_MINIFY_HTML` | `0` | **Off by default** — also minify the cleaned HTML before the **AI** path (shrinks the model input; never touches native output) |
 
 ## How it converts content
 
@@ -212,6 +213,45 @@ raw HTML to both paths.
 | `PREPROCESS_MIN_CHARS` | `800` | Don't clean documents shorter than this |
 | `PREPROCESS_MAX_ELEMENTS` | `0` | Bound DOM elements processed (`0` = no cap) |
 | `PREPROCESS_BINARY` | `dom_smoothie_cli` | Binary path (bundled on PATH) |
+
+## Post-clean minification (AI input only, opt-in)
+
+With `PREPROCESS_MINIFY_HTML=1`, the Readability-cleaned HTML is additionally
+run through the [`@minify-html/node`](https://www.npmjs.com/package/@minify-html/node)
+minifier **before** it is handed to the AI sidecar. This removes collapsible
+whitespace, comments, and empty/redundant attributes from the model's input
+(measured ~12% smaller on a large Wikipedia article, ~2-3% on a typical page),
+and because the AI's **prefill cost grows super-linearly** with input length,
+it measurably cuts AI prefill latency (~19% on a 572 KB page).
+
+This is safe by construction, with two invariants baked in (see
+[`src/minify.ts`](src/minify.ts)):
+
+- **Structure-preserving.** The minifier's *defaults* drop optional closing tags
+  (`</td>`, `</tr>`, `</p>`, …) — and `node-html-markdown` relies on those tags
+to detect tables/paragraphs. With the defaults, a Wikipedia infobox silently turns
+from a table into a blockquote and ~30% of the markdown is lost. We therefore
+**always** pass `keep_closing_tags` + `keep_comments`, so minification only
+removes byte-safe whitespace/entities. The resulting markdown is byte-identical
+to the unminified markdown on the pages that matter (tables, code, `<pre>`).
+- **AI path only.** The native `node-html-markdown` renderer always consumes the
+  *unminified* cleaned HTML, so this toggle can never change the markdown a native
+  (non-AI) deployment serves — it only shrinks the bytes the AI model prefills.
+
+The minifier is a **native addon** and the step degrades gracefully: if it is
+missing, mismatched to the platform, or errors on a document, the unminified HTML
+is used instead. It can never break a conversion — at worst you pay a slightly
+larger AI prefill. It is gated on the same `PREPROCESS_HTML` + `PREPROCESS_MIN_CHARS`
+rules as the cleaner, so tiny fragments are never minified.
+
+> **Cache note:** the AI output is cached under the `:ai:<url>` key, which does
+> not encode the minify setting. Toggling `PREPROCESS_MINIFY_HTML` on an already
+> cached URL serves the cached (whitespace-level) variant until the cache expires
+> or is cleared — a cold start reflects the new setting immediately.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PREPROCESS_MINIFY_HTML` | `0` | Master switch. `1` also minifies the **AI-path** input (opt-in; off by default) |
 
 ## Optional: AI Markdown Conversion (opt-in)
 

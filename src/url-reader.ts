@@ -28,6 +28,7 @@ import type {
 } from "./types.js";
 import { aiShouldAttempt, maybeAiConvert } from "./ai-converter.js";
 import { preprocessHtml } from "./preprocess.js";
+import { minifyHtml } from "./minify.js";
 import {
   createContentError,
   createConversionError,
@@ -552,6 +553,17 @@ async function convertResponse(
  * is unavailable it returns the original HTML, so the conversion still runs.
  * The AI size gate is evaluated against the CLEANED length, which is what the
  * model will actually be sent.
+ *
+ * When `PREPROCESS_MINIFY_HTML` is enabled, the AI path additionally runs the
+ * cleaner's output through the `@minify-html/node` minifier (with its safe,
+ * structure-preserving options) so the model prefills fewer bytes. The native
+ * renderer keeps consuming the unminified `cleaned` HTML, so toggling this
+ * can only change the AI path's input, never the markdown a native deployment
+ * serves. The minifier is a native addon that degrades to the unminified HTML
+ * if it is missing or fails, so it can never break a conversion. The AI size
+ * gate is evaluated against the CLEANED length (the minify step runs after the
+ * gate, so a document that is too large is never sent minified to a model that
+ * would reject it anyway).
  */
 async function convertHtmlContent(
   html: string,
@@ -578,8 +590,14 @@ async function convertHtmlContent(
       converter: "native",
     };
   }
+  // Shrink the AI input (opt-in). The native renderer above already ran on the
+  // unminified `cleaned`; only the bytes handed to the model are minified. This
+  // is a no-op that returns `cleaned` when minify is off or the addon is absent.
+  const aiInput = await minifyHtml(cleaned, config, (level, msg) =>
+    log(config, level === "warn" ? "info" : level, msg),
+  );
   const { markdown, converter } = await maybeAiConvert(
-    cleaned,
+    aiInput,
     nativeMarkdown,
     url,
     config,

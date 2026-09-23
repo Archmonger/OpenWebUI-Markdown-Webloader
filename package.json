@@ -25,6 +25,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@minify-html/node": "^0.18.1",
     "node-html-markdown": "^2.0.0",
     "node-html-parser": "^9.0.4",
     "undici": "^8.10.2",
