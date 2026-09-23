@@ -48,6 +48,13 @@ ARG AI_BUILDER_ARGS="-o /build/model -p int4 -e cuda --extra_options use_paged_a
 # CUDA genai package (NOT plain `onnxruntime-genai`, which conflicts) so the
 # `-e cuda` builder provider is available.
 ARG AI_PYTHON_BUILDER_DEPS="olive-ai onnxruntime-genai-cuda"
+# Optional Hugging Face token used only during build (for gated source models).
+# Public models like jinaai/ReaderLM-v2 work with a dummy value too — set the
+# env var to anything non-empty to satisfy `token=True` (see below) without
+# providing real credentials. Pass as `--build-arg HF_TOKEN=hf_xxx` when the
+# source model is gated; token is NOT persisted in the final image (only in
+# the discarded builder stage, which we never ship).
+ARG HF_TOKEN=""
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
@@ -62,7 +69,15 @@ RUN set -eux; \
         echo "AI_BUILDER_ARGS must include '-o /build/model' for the runtime copy"; \
         exit 1; \
     fi; \
-    python -m onnxruntime_genai.models.builder -i "${AI_MODEL_SOURCE}" ${AI_BUILDER_ARGS}
+    # genai 0.16.0 builder CLI: `-m` = HF repo id, `-i` = local disk path.
+    # The model source is an HF repo (not a pre-mounted dir), so use -m.
+    # HF_TOKEN env: the builder defaults to `token=True` which raises
+    # LocalTokenNotFoundError unless a token exists; for a PUBLIC source a dummy
+    # value suffices because HF ignores the auth header on a 200-eligible
+    # request. Export a placeholder if the operator didn't pass a real token.
+    : "${HF_TOKEN:=public-source-placeholder}"; \
+    export HF_TOKEN; \
+    python -m onnxruntime_genai.models.builder -m "${AI_MODEL_SOURCE}" ${AI_BUILDER_ARGS}
 
 ############ runtime ############
 FROM python:${AI_PYTHON_VERSION}-slim AS runtime
