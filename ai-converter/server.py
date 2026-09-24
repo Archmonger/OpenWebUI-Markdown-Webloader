@@ -11,6 +11,12 @@ the exact recipe validated for this project:
     spike and enables the continuous-batching Engine API.
   * Greedy decoding (temperature 0 -> do_sample=False) for deterministic,
     faithful markdown, which is the ReaderLM-v2 intended usage.
+  * No operator-facing token budget: generation stops at the model's EOS
+    token, and the caller-side timeout (loader AI_CONVERT_TIMEOUT_MS) is the
+    only other stop factor. onnxruntime-genai's TurnOptions still requires a
+    numeric ceiling, so a large internal runaway guard exists; it is a
+    degenerate-output safety valve, not a tuning knob (the loader timeout
+    always cuts in first in normal operation).
   * CUDA-graph capture and a bounded `gpu_utilization_factor` at runtime, both
     supplied via the operator-controlled `AI_RUNTIME_CFG` overlay JSON so the
     GPU-vendor-specific session options never have to be hardcoded here.
@@ -93,6 +99,14 @@ SYSTEM_PROMPT = os.environ.get(
     "AI_SYSTEM_PROMPT", "Convert the HTML to Markdown. Output only the Markdown."
 )
 MODEL_NAME = os.environ.get("AI_MODEL_NAME", "ReaderLM-v2")
+# onnxruntime-genai's TurnOptions API REQUIRES a maximum generated-token
+# count, but there is deliberately no operator-facing token budget: the
+# intended stop conditions are the model's EOS token and the caller's
+# timeout (loader AI_CONVERT_TIMEOUT_MS). This large constant only guards
+# against degenerate never-EOS generation; any real conversion or the loader
+# timeout finishes far below it. Do not tune this to shape output length —
+# raise AI_CONVERT_TIMEOUT_MS instead.
+RUNAWAY_TOKEN_CAP = 65536
 
 # Shared readiness state between the owner thread and the HTTP handlers.
 _READY = threading.Event()
@@ -234,7 +248,7 @@ class ServerBusy(Exception):
 
 
 # Public entry used by the HTTP layer: enqueue a conversion and block for it.
-def convert(html, max_new_tokens, temperature, top_k, top_p, seed):
+def convert(html, temperature, top_k, top_p, seed):
     # Overload shedding: if too many conversions are already queued, refuse this
     # one (503) instead of growing the backlog. The loader treats 503 as an AI
     # failure and falls back to the native renderer, so this degrades gracefully.
@@ -244,7 +258,8 @@ def convert(html, max_new_tokens, temperature, top_k, top_p, seed):
     done = threading.Event()
     kwargs = {
         "html": html,
-        "max_new_tokens": max_new_tokens,
+        # Not request-configurable: see RUNAWAY_TOKEN_CAP.
+        "max_new_tokens": RUNAWAY_TOKEN_CAP,
         "temperature": temperature,
         "top_k": top_k,
         "top_p": top_p,
@@ -321,9 +336,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            # There is no max_new_tokens field: generation stops at EOS or the
+            # caller's timeout. A legacy request that still sends one has the
+            # field ignored (old loaders keep working).
             result = convert(
                 html,
-                int(payload.get("max_new_tokens", 8192)),
                 float(payload.get("temperature", 0.0)),
                 int(payload.get("top_k", 1)),
                 float(payload.get("top_p", 1.0)),

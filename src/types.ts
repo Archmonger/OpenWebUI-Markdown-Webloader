@@ -163,7 +163,11 @@ export interface HealthResponse {
     ai_enabled: boolean;
     ai_service_url?: string;
     ai_fallback_on_error?: boolean;
-    /** Model name reported by the sidecar on the most recent successful ping. */
+    /**
+     * Model name reported by the sidecar on the most recent successful
+     * conversion. Absent until the first AI conversion has succeeded — /health
+     * itself never pings the sidecar.
+     */
     ai_model?: string;
   };
 }

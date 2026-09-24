@@ -82,6 +82,13 @@ export function cacheKeyFor(url: string, options: ResolvedOptions): string {
 /**
  * Cache key for an AI-converted document. Namespaced so an AI result and the
  * native result for the same URL never shadow each other.
+ *
+ * Known staleness trade-off: the key encodes the output format and URL only —
+ * not the AI generation parameters (temperature, top-k/p, seed) or the minify
+ * toggle. Changing those server settings therefore does NOT invalidate cached
+ * AI documents; a new setting only takes effect for uncached URLs or once the
+ * entry's TTL expires (restart also clears it, as the cache is in-memory).
+ * Accepting this keeps the key (and thus hit rates) stable across requests.
  */
 export function aiCacheKeyFor(url: string, options: ResolvedOptions): string {
   return `${options.respondWith}:ai:${url}`;
@@ -577,7 +584,7 @@ async function convertHtmlContent(
 
   // Pre-clean once; shared by the native and AI paths. Falls back to `html`.
   const cleaned = await preprocessHtml(html, url, config, (level, msg) =>
-    log(config, level === "warn" ? "info" : level, msg),
+    log(config, level, msg),
   );
 
   const nativeMarkdown = renderNativeHtmlMarkdown(cleaned, url);
@@ -594,14 +601,14 @@ async function convertHtmlContent(
   // unminified `cleaned`; only the bytes handed to the model are minified. This
   // is a no-op that returns `cleaned` when minify is off or the addon is absent.
   const aiInput = await minifyHtml(cleaned, config, (level, msg) =>
-    log(config, level === "warn" ? "info" : level, msg),
+    log(config, level, msg),
   );
   const { markdown, converter } = await maybeAiConvert(
     aiInput,
     nativeMarkdown,
     url,
     config,
-    (level, msg) => log(config, level === "warn" ? "info" : level, msg),
+    (level, msg) => log(config, level, msg),
   );
   return { kind: "markdown", markdown, ...meta, converter };
 }
@@ -821,7 +828,7 @@ function extractLinks(html: string, limit = 100): LinkInfo[] {
 
 function log(
   config: AppConfig,
-  level: "info" | "debug",
+  level: "warn" | "info" | "debug",
   message: string,
 ): void {
   const order = { off: 0, error: 1, warn: 2, info: 3, debug: 4 } as const;

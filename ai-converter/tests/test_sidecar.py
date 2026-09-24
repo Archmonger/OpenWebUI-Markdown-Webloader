@@ -34,6 +34,10 @@ if SIDECAR_DIR not in sys.path:
 # inspect the most recent one.
 _LAST_CONFIG = {}
 
+# Captures the most recent og.TurnOptions the sidecar builds, so tests can
+# assert what generation ceiling the engine was actually given.
+_LAST_TURNOPT = {}
+
 
 class _FakeTokenizer:
     def apply_chat_template(self, msgs_json, add_generation_prompt=True):
@@ -109,6 +113,10 @@ class _FakeTurnOptions:
     def __init__(self, req):
         self.req = req
         self.values = {}
+        # Records the most recent instance so tests can assert on the engine
+        # call parameters (e.g. the runaway cap, never a client budget).
+        _LAST_TURNOPT["instance"] = self
+        _LAST_TURNOPT["values"] = self.values
 
     def set_max_generated_tokens(self, v):
         self.values["max"] = v
@@ -213,6 +221,7 @@ def _http_json(port, method, path, body=None, token=None):
 class SidecarContractTest(unittest.TestCase):
     def setUp(self):
         _LAST_CONFIG.clear()
+        _LAST_TURNOPT.clear()
 
     def _serve(self, srv):
         port, stop = _start_sidecar(srv)
@@ -222,6 +231,10 @@ class SidecarContractTest(unittest.TestCase):
     def test_convert_success_contract(self):
         srv = _load_server()
         port = self._serve(srv)
+        # A legacy client sending max_new_tokens must keep working AND the
+        # field must be ignored: the only generation stop factors are EOS and
+        # the caller's timeout, so the engine always runs with the internal
+        # runaway guard (RUNAWAY_TOKEN_CAP), never a client-supplied cap.
         status, body = _http_json(
             port, "POST", "/convert", {"html": "<h1>hi</h1>", "max_new_tokens": 128}
         )
@@ -230,6 +243,7 @@ class SidecarContractTest(unittest.TestCase):
             self.assertIn(key, body)
         self.assertIsInstance(body["markdown"], str)
         self.assertTrue(body["markdown"])
+        self.assertEqual(_LAST_TURNOPT["values"]["max"], srv.RUNAWAY_TOKEN_CAP)
 
     def test_owner_thread_marshalling(self):
         # Conversions must be funneled to the single engine-owner thread, not the
@@ -321,7 +335,7 @@ class SidecarContractTest(unittest.TestCase):
         self.assertEqual(srv.MAX_QUEUE, 1)
         self.assertGreaterEqual(srv._WORK_QUEUE.qsize(), 1)
         with self.assertRaises(srv.ServerBusy):
-            srv.convert("<p>x</p>", 10, 0.0, 1, 1.0, None)
+            srv.convert("<p>x</p>", 0.0, 1, 1.0, None)
 
     def test_busy_maps_to_503(self):
         # End-to-end through the handler: a full queue returns HTTP 503 busy.

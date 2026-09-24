@@ -23,7 +23,6 @@ export interface AiConvertSuccess {
   markdown: string;
   tokens: number;
   model: string;
-  latencyMs: number;
 }
 
 export interface AiConvertFailure {
@@ -51,27 +50,32 @@ export function getLastAiModel(): string | undefined {
  *     ```
  *
  * The native converter returns raw Markdown, so we unwrap the fence to keep the
- * two paths consistent. This is deliberately conservative: it only removes the
- * fence when the trimmed text both starts and ends with ``` and the opening line
- * is a plain language tag (or empty). Anything else is returned untouched so we
- * never corrupt content that merely happens to contain triple backticks.
+ * two paths consistent. Detection is deliberately strict — ALL of these must
+ * hold, or the document is returned completely untouched:
+ *
+ *   1. The trimmed text opens with a fence whose remainder is only a bare
+ *      language tag (or nothing): ``` or ```markdown on their own line.
+ *   2. The trimmed text ends with a standalone fence delimiter line (a closer
+ *      occupying its own line), not ``` glued onto real content.
+ *   3. The interior between those two delimiter lines contains NO fence
+ *      markers of its own. Without this rule a legitimate multi-fence
+ *      document — e.g. a tutorial that opens AND closes with a code example —
+ *      would have its language tag and final closer silently deleted, leaving
+ *      stray ``` markers stranded mid-document. Any interior fence means "this
+ *      is a real Markdown document, not a wrapped output": leave it alone.
  */
 export function stripOuterCodeFence(md: string): string {
   const trimmed = md.trim();
-  if (!trimmed.startsWith("```") || !trimmed.endsWith("```")) return md;
-  // Need at least an opener line and a closer (i.e. more than just the fences).
-  const inner = trimmed.slice(3, -3);
-  const nl = inner.indexOf("\n");
-  // No newline after the opener means it is not a real fenced block; leave it.
-  if (nl === -1) return md;
-  const openLine = inner.slice(0, nl).trim();
-  // If the opening line is a bare language tag (markdown, html, or empty),
-  // drop it and return the body. Otherwise the opener line is real content and
-  // we must not have mis-detected — leave the document as-is.
-  if (/^[a-z0-9_+-]*$/i.test(openLine)) {
-    return inner.slice(nl + 1).trimEnd();
-  }
-  return md;
+  // Opener: ``` plus an optional bare language tag, then end of line.
+  const opener = /^```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n/.exec(trimmed);
+  if (!opener) return md;
+  // Closer: a final line holding nothing but the fence delimiter.
+  if (!/\r?\n[ \t]*```$/.test(trimmed)) return md;
+  // Everything strictly between the opener line and the closer line.
+  const inner = trimmed.slice(opener[0].length, trimmed.lastIndexOf("\n"));
+  // Real content must not contain further fences, or this is not a wrapper.
+  if (inner.includes("```")) return md;
+  return inner.trimEnd();
 }
 
 /**
@@ -111,9 +115,11 @@ export async function aiConvertHtml(
   };
   if (ai.token) headers.authorization = `Bearer ${ai.token}`;
 
+  // No token budget is sent: the generation stop condition is the request
+  // timeout (AI_CONVERT_TIMEOUT_MS), so operators tune one knob, not two
+  // conflicting ones. The sidecar generates until EOS or the timeout.
   const payload = {
     html,
-    max_new_tokens: ai.maxNewTokens,
     temperature: ai.temperature,
     top_k: ai.topK,
     top_p: ai.topP,
@@ -138,7 +144,6 @@ export async function aiConvertHtml(
       markdown?: unknown;
       tokens?: unknown;
       model?: unknown;
-      latency_ms?: unknown;
     };
     if (typeof data.markdown !== "string" || data.markdown.trim() === "") {
       return { ok: false, reason: "AI converter returned empty markdown" };
@@ -153,10 +158,6 @@ export async function aiConvertHtml(
       markdown: cleanMarkdown,
       tokens: typeof data.tokens === "number" ? data.tokens : 0,
       model: typeof data.model === "string" ? data.model : "readerlm",
-      latencyMs:
-        typeof data.latency_ms === "number"
-          ? data.latency_ms
-          : Math.round(performance.now()),
     };
   } catch (error) {
     const aborted = (error as Error)?.name === "AbortError";

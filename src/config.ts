@@ -134,12 +134,17 @@ export interface AiConverterConfig {
   serviceUrl: string;
   /** Optional bearer token; sent as `Authorization: Bearer <token>`. */
   token: string | undefined;
-  /** Per-request timeout to the sidecar in ms (fail fast -> fallback). */
+  /**
+   * Per-request timeout to the sidecar in ms (fail fast -> fallback).
+   * This is the ONLY generation stop factor: no token budget is sent to the
+   * sidecar, so the model generates until it emits EOS or this timeout aborts
+   * the request (and the native fallback takes over). Operators tune one
+   * knob, not two conflicting ones.
+   */
   timeoutMs: number;
   /** On sidecar failure/timeout, fall back to node-html-markdown (default true). */
   fallbackOnError: boolean;
   /** Generation settings forwarded to the model per request. */
-  maxNewTokens: number;
   temperature: number;
   topK: number;
   topP: number;
@@ -266,8 +271,10 @@ function parseNonNegativeInt(
 /**
  * Read the AI converter sub-config. Everything is opt-in: with
  * `AI_CONVERTER_ENABLED` unset/false, `enabled` is false and the rest of the
- * values are still parsed (so a later enable via header is consistent) but
- * nothing in the request path references the AI service.
+ * values are still parsed (so toggling the master switch requires no special
+ * casing), but nothing in the request path references the AI service. A
+ * per-request header can only opt OUT of AI (`x-ai-convert: 0`), never on —
+ * the server-wide switch is the only way the AI path is activated.
  */
 function loadAiConfig(env: NodeJS.ProcessEnv): AiConverterConfig {
   const enabled = readBool(env, "AI_CONVERTER_ENABLED", false);
@@ -287,7 +294,6 @@ function loadAiConfig(env: NodeJS.ProcessEnv): AiConverterConfig {
     token: env.AI_CONVERTER_TOKEN || undefined,
     timeoutMs: readInt(env, "AI_CONVERT_TIMEOUT_MS", 30_000),
     fallbackOnError: readBool(env, "AI_FALLBACK_ON_ERROR", true),
-    maxNewTokens: readInt(env, "AI_MAX_NEW_TOKENS", 8192),
     temperature: readFloat(env, "AI_TEMPERATURE", 0.0),
     topK: readInt(env, "AI_TOP_K", 1),
     topP: readFloat(env, "AI_TOP_P", 1.0),

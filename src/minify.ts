@@ -40,9 +40,11 @@ import type { AppConfig } from "./config.js";
 /**
  * The minifier options we always use. These are the ONLY options the package
  * exposes that change structural output, and both are forced `true` to prevent
- * the destructive defaults. (Whitespace/attribute/comment removal is always
- * applied by the package and has no opt-out, but is byte-safe for parsing — it is
- * exactly what makes the input smaller.)
+ * the destructive defaults. What the minifier therefore removes is collapsed
+ * whitespace and redundant/empty attributes only — comments are explicitly
+ * KEPT (`keep_comments: true`), both because conditional comments can carry
+ * meaning and because keeping them makes the transform strictly byte-safe for
+ * downstream parsing. Whitespace collapse is what makes the input smaller.
  */
 const SAFE_MINIFY_OPTIONS: {
   keep_closing_tags: boolean;

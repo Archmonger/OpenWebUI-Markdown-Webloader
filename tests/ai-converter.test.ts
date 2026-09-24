@@ -92,11 +92,23 @@ describe("AI config defaults", () => {
     expect(cfg.ai.enabled).toBe(false);
     expect(cfg.ai.serviceUrl).toBe("http://localhost:8090");
     expect(cfg.ai.fallbackOnError).toBe(true);
-    expect(cfg.ai.maxNewTokens).toBe(8192);
     expect(cfg.ai.temperature).toBe(0.0);
     expect(cfg.ai.topK).toBe(1);
     expect(cfg.ai.cacheAiOutput).toBe(true);
     expect(cfg.ai.seed).toBeUndefined();
+  });
+
+  // The request timeout (AI_CONVERT_TIMEOUT_MS) is the ONLY generation stop
+  // factor. There must be no token-budget knob left to tune: a cap set above
+  // what the timeout can deliver just wastes GPU on a conversion doomed to be
+  // abandoned and re-rendered natively.
+  test("no token-budget knob exists; AI_MAX_NEW_TOKENS has no effect", () => {
+    const cfg = loadConfig(baseEnv({ AI_MAX_NEW_TOKENS: "1024" }));
+    const ai = cfg.ai as unknown as Record<string, unknown>;
+    // The field is gone from the shape entirely: setting the old env var must
+    // not resurrect it (and Object.keys proves it is not silently defaulted).
+    expect(ai.maxNewTokens).toBeUndefined();
+    expect(Object.keys(ai)).not.toContain("maxNewTokens");
   });
 
   test("trailing slash trimmed from service URL", () => {
@@ -109,7 +121,6 @@ describe("AI config defaults", () => {
       baseEnv({
         AI_CONVERTER_ENABLED: "true",
         AI_FALLBACK_ON_ERROR: "0",
-        AI_MAX_NEW_TOKENS: "1024",
         AI_TEMPERATURE: "0.7",
         AI_SEED: "42",
         AI_MAX_HTML_CHARS: "123",
@@ -118,7 +129,6 @@ describe("AI config defaults", () => {
     );
     expect(cfg.ai.enabled).toBe(true);
     expect(cfg.ai.fallbackOnError).toBe(false);
-    expect(cfg.ai.maxNewTokens).toBe(1024);
     expect(cfg.ai.temperature).toBe(0.7);
     expect(cfg.ai.seed).toBe(42);
     expect(cfg.ai.maxHtmlChars).toBe(123);
@@ -165,6 +175,33 @@ describe("stripOuterCodeFence", () => {
     const input = "```markdown this is content```";
     // starts + ends with ``` but no newline -> treated as not a real fence block.
     expect(stripOuterCodeFence(input)).toBe(input);
+  });
+
+  // Regression: a legitimate multi-fence document (e.g. a tutorial that opens
+  // AND closes with a code example) previously had its language tag and final
+  // closer deleted, stranding ``` markers mid-document. The strict rule now
+  // leaves it byte-for-byte untouched.
+  test("never corrupts a document that opens AND closes with a code fence", () => {
+    const input =
+      "```python\nx = 1\n```\n\nSome prose in the middle.\n\n```js\nconsole.log(2)\n```";
+    expect(stripOuterCodeFence(input)).toBe(input);
+  });
+
+  // The closer must occupy its own line: ``` glued onto real content is not a
+  // document wrapper, so we must not treat it as one.
+  test("does not strip when the closing fence is not a standalone line", () => {
+    const input = "```markdown\n# Title\n\nreal content```";
+    expect(stripOuterCodeFence(input)).toBe(input);
+  });
+
+  test("unwraps and trims trailing whitespace/newlines from the body", () => {
+    const input = "```markdown\n# H\n\nbody\n\n\n```";
+    expect(stripOuterCodeFence(input)).toBe("# H\n\nbody");
+  });
+
+  test("handles CRLF-delimited fences", () => {
+    const input = "```markdown\r\n# Title\r\n\r\nBody.\r\n```";
+    expect(stripOuterCodeFence(input)).toBe("# Title\r\n\r\nBody.");
   });
 });
 
@@ -219,8 +256,12 @@ describe("aiConvertHtml client", () => {
       expect(res.markdown).toContain("AI Generated");
       expect(res.tokens).toBe(42);
       expect(res.model).toBe("ReaderLM-v2");
+      // latencyMs was removed: no dead field on the success shape.
+      expect(res).not.toHaveProperty("latencyMs");
     }
     expect(stub.state.lastBody.html).toContain("hi");
+    // Wire contract: no token budget is sent — the timeout is the only stop.
+    expect(stub.state.lastBody).not.toContainKey("max_new_tokens");
     stub.server.stop(true);
   });
 

@@ -30,8 +30,22 @@ import { resolveOptions } from "./options.js";
 import { readUrl, type UrlReadResult } from "./url-reader.js";
 import { getLastAiModel } from "./ai-converter.js";
 import { SimpleCache } from "./cache.js";
+import packageJson from "../package.json" with { type: "json" };
 
-const VERSION = "0.1.0";
+/**
+ * Engine version, taken from package.json so the two can never drift (a
+ * hand-maintained const here silently goes stale the moment a release bumps
+ * the manifest).
+ */
+const VERSION: string = packageJson.version;
+
+/**
+ * CORS `Access-Control-Allow-Headers` for every response that carries CORS
+ * headers. Single source of truth: add a new x-* option header here and both
+ * the preflight and JSON responses pick it up.
+ */
+const ALLOWED_HEADERS =
+  "content-type,authorization,x-respond-with,x-no-cache,x-target-selector,x-remove-selector,x-wait-for-selector,x-timeout,x-user-agent,x-proxy-url,x-with-images-summary,x-with-links-summary,x-ai-convert";
 
 export interface ServerHandle {
   port: number;
@@ -58,8 +72,7 @@ export function createServer(config: AppConfig): ServerHandle {
         "content-type": "application/json",
         "access-control-allow-origin": "*",
         "access-control-allow-methods": "POST,GET,OPTIONS",
-        "access-control-allow-headers":
-          "content-type,authorization,x-respond-with,x-no-cache,x-target-selector,x-remove-selector,x-wait-for-selector,x-timeout,x-user-agent,x-proxy-url,x-with-images-summary,x-with-links-summary,x-ai-convert",
+        "access-control-allow-headers": ALLOWED_HEADERS,
       },
     });
 
@@ -125,8 +138,7 @@ export function createServer(config: AppConfig): ServerHandle {
           headers: {
             "access-control-allow-origin": "*",
             "access-control-allow-methods": "POST,GET,OPTIONS",
-            "access-control-allow-headers":
-              "content-type,authorization,x-respond-with,x-no-cache,x-target-selector,x-remove-selector,x-wait-for-selector,x-timeout,x-user-agent,x-proxy-url,x-with-images-summary,x-with-links-summary,x-ai-convert",
+            "access-control-allow-headers": ALLOWED_HEADERS,
           },
         });
       }
