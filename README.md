@@ -139,7 +139,7 @@ curl http://localhost:14786/health
 | `x-remove-selector` | CSS selector | (reserved) remove matching elements |
 | `x-with-images-summary` | `true` | Include an image list in `/load` |
 | `x-with-links-summary` | `true` | Include a link list in `/load` |
-| `x-ai-convert` | `0` / `false` | Per-request **opt-out** of AI conversion (see below). Only meaningful when the AI feature is enabled server-wide. |
+| `x-ai-convert` | `0` / `false` | Per-request **opt-out** of AI conversion (see [AI conversion](ai-converter/README-ai-conversion.md#per-request-control)). Only meaningful when the AI feature is enabled server-wide. |
 
 ## Configuration
 
@@ -169,7 +169,20 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 | `PREPROCESS_MIN_CHARS` | `800` | Skip documents smaller than this |
 | `PREPROCESS_MAX_ELEMENTS` | `0` | Cap DOM elements cleaned (`0` = unlimited) |
 | `PREPROCESS_BINARY` | `dom_smoothie_cli` | Path to the cleaner binary (bundled on PATH) |
-| `PREPROCESS_MINIFY_HTML` | `0` | **Off by default** — also minify the cleaned HTML before the **AI** path (shrinks the model input; never touches native output) |
+| `PREPROCESS_MINIFY_HTML` | `0` | **Off by default** — also minify the cleaned HTML before the **AI** path (shrinks the model input; never touches native output; see [AI conversion](ai-converter/README-ai-conversion.md#post-clean-minification-of-the-ai-input-opt-in)) |
+| `AI_CONVERTER_ENABLED` | `0` | **Off by default** — master on/off switch for AI (ReaderLM) conversion; see [AI conversion](ai-converter/README-ai-conversion.md) |
+| `AI_SERVICE_URL` | `http://localhost:8090` | AI sidecar base URL (use `ai-converter` in compose) |
+| `AI_CONVERTER_TOKEN` | – | Shared bearer token with the AI sidecar |
+| `AI_CONVERT_TIMEOUT_MS` | `30000` | Loader→AI-sidecar timeout; exceed ⇒ native fallback |
+| `AI_FALLBACK_ON_ERROR` | `1` | Fall back to native on any AI error (0 = surface a 500) |
+| `AI_MAX_NEW_TOKENS` | `8192` | Model output token cap |
+| `AI_TEMPERATURE` | `0.0` | `0` ⇒ greedy/deterministic (validated) |
+| `AI_TOP_K` | `1` | Nucleus/top-k (used only if temperature > 0) |
+| `AI_TOP_P` | `1.0` | Nucleus sampling (used only if temperature > 0) |
+| `AI_SEED` | – | RNG seed (≥ 0); no effect under greedy |
+| `AI_MIN_HTML_CHARS` | `1` | Don't AI-route documents smaller than this |
+| `AI_MAX_HTML_CHARS` | `2000000` | Don't AI-route documents larger than this |
+| `AI_CACHE_OUTPUT` | `1` | Cache AI output under the separate `ai:` lane |
 
 ## How it converts content
 
@@ -180,6 +193,16 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 | `text/*`, `+xml`, `yaml`, `toml` | Fenced block tagged with the language |
 | `application/pdf` | Extracted text in a `text` fence (no OCR) |
 | binary / media / archives | Rejected with an explanatory message |
+
+When **AI conversion** is enabled (`AI_CONVERTER_ENABLED=1`), HTML documents are
+additionally routed to an optional [ReaderLM-v2](https://huggingface.co/jinaai/ReaderLM-v2)
+GPU sidecar for an LLM-grade Markdown conversion, always with a native
+`node-html-markdown` fallback. Everything is opt-in: without it, the engine is
+a pure native loader and no AI dependency is installed or contacted. Enabling,
+per-request control, the validated GPU configuration, and the optional
+post-clean AI-input minification are documented in
+[**ai-converter/README-ai-conversion.md**](ai-converter/README-ai-conversion.md)
+(sidecar/vendor build knobs: [ai-converter/README-vendors.md](ai-converter/README-vendors.md)).
 
 ## HTML pre-cleaning (Readability)
 
@@ -213,137 +236,6 @@ raw HTML to both paths.
 | `PREPROCESS_MIN_CHARS` | `800` | Don't clean documents shorter than this |
 | `PREPROCESS_MAX_ELEMENTS` | `0` | Bound DOM elements processed (`0` = no cap) |
 | `PREPROCESS_BINARY` | `dom_smoothie_cli` | Binary path (bundled on PATH) |
-
-## Post-clean minification (AI input only, opt-in)
-
-With `PREPROCESS_MINIFY_HTML=1`, the Readability-cleaned HTML is additionally
-run through the [`@minify-html/node`](https://www.npmjs.com/package/@minify-html/node)
-minifier **before** it is handed to the AI sidecar. This removes collapsible
-whitespace, comments, and empty/redundant attributes from the model's input
-(measured ~12% smaller on a large Wikipedia article, ~2-3% on a typical page),
-and because the AI's **prefill cost grows super-linearly** with input length,
-it measurably cuts AI prefill latency (~19% on a 572 KB page).
-
-This is safe by construction, with two invariants baked in (see
-[`src/minify.ts`](src/minify.ts)):
-
-- **Structure-preserving.** The minifier's *defaults* drop optional closing tags
-  (`</td>`, `</tr>`, `</p>`, …) — and `node-html-markdown` relies on those tags
-to detect tables/paragraphs. With the defaults, a Wikipedia infobox silently turns
-from a table into a blockquote and ~30% of the markdown is lost. We therefore
-**always** pass `keep_closing_tags` + `keep_comments`, so minification only
-removes byte-safe whitespace/entities. The resulting markdown is byte-identical
-to the unminified markdown on the pages that matter (tables, code, `<pre>`).
-- **AI path only.** The native `node-html-markdown` renderer always consumes the
-  *unminified* cleaned HTML, so this toggle can never change the markdown a native
-  (non-AI) deployment serves — it only shrinks the bytes the AI model prefills.
-
-The minifier is a **native addon** and the step degrades gracefully: if it is
-missing, mismatched to the platform, or errors on a document, the unminified HTML
-is used instead. It can never break a conversion — at worst you pay a slightly
-larger AI prefill. It is gated on the same `PREPROCESS_HTML` + `PREPROCESS_MIN_CHARS`
-rules as the cleaner, so tiny fragments are never minified.
-
-> **Cache note:** the AI output is cached under the `:ai:<url>` key, which does
-> not encode the minify setting. Toggling `PREPROCESS_MINIFY_HTML` on an already
-> cached URL serves the cached (whitespace-level) variant until the cache expires
-> or is cleared — a cold start reflects the new setting immediately.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PREPROCESS_MINIFY_HTML` | `0` | Master switch. `1` also minifies the **AI-path** input (opt-in; off by default) |
-
-## Optional: AI Markdown Conversion (opt-in)
-
-By default the loader is a **pure, dependency-free** converter: HTML is rendered
-with `node-html-markdown` and nothing AI-related is installed, contacted, or
-required. This is the behavior unless you explicitly opt in.
-
-When enabled, **HTML** documents (and only HTML — JSON/PDF/text/etc. always use
-the native path) are routed to an optional [ReaderLM-v2](https://huggingface.co/jinaai/ReaderLM-v2)
-GPU sidecar for a higher-quality, LLM-grade Markdown conversion. The sidecar is a
-separate container because it needs the Python `onnxruntime-genai` runtime, which
-cannot live inside the Bun process. The loader talks to it over HTTP and **always
-falls back** to `node-html-markdown` if the sidecar is slow, erroring, or
-unreachable — so enabling the feature never breaks loading.
-
-### Enabling it
-
-```bash
-# 1. Point the loader at the sidecar and turn the feature on:
-export AI_CONVERTER_ENABLED=1
-export AI_SERVICE_URL=http://ai-converter:8090
-# (optional) shared secret between loader and sidecar:
-export AI_CONVERTER_TOKEN=***
-
-# 2. Start BOTH the loader and the sidecar via the `ai` compose profile:
-docker compose --profile ai up -d
-```
-
-Without `--profile ai` the sidecar never starts and `AI_CONVERTER_ENABLED` is
-irrelevant — you get the pure native loader. The `.env` default is `0` (off).
-
-### How it behaves
-
-- **HTML only.** Non-HTML content is never sent to the model.
-- **Size window.** Documents outside `AI_MIN_HTML_CHARS`..`AI_MAX_HTML_CHARS`
-  are rendered natively, protecting VRAM and latency.
-- **Graceful fallback.** Any sidecar failure returns the native rendering and
-  marks `metadata.converter = "fallback"` instead of erroring (unless you set
-  `AI_FALLBACK_ON_ERROR=0`).
-- **Cache lanes.** AI output is cached under a separate `ai:` key so it never
-  shadows the native rendering of the same URL, and vice versa. A `fallback`
-  result is **not** cached, so a later request retries the AI once the service
-  recovers.
-- **Provenance.** Every response's `metadata.converter` reports `"native"`,
-  `"ai"`, or `"fallback"` so you can see what produced the output.
-
-### Per-request control
-
-Send `x-ai-convert: 0` (or body `{"options": {"aiConvert": false}}`) to force a
-single request through the native converter even when the feature is globally on
-(a per-document opt-out). A request can never force the AI *on* when the
-operator has not enabled it server-wide.
-
-### AI environment variables
-
-Loader-side (all read by the Bun engine). Defaults reproduce the validated test
-setup; `AI_CONVERTER_ENABLED` is the master switch and is **off** by default.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AI_CONVERTER_ENABLED` | `0` | Master on/off switch for the AI path |
-| `AI_SERVICE_URL` | `http://localhost:8090` | Sidecar base URL (use `ai-converter` in compose) |
-| `AI_CONVERTER_TOKEN` | – | Shared bearer token with the sidecar |
-| `AI_CONVERT_TIMEOUT_MS` | `30000` | Loader→sidecar timeout; exceed ⇒ fallback |
-| `AI_FALLBACK_ON_ERROR` | `1` | Fall back to native on any AI error |
-| `AI_MAX_NEW_TOKENS` | `8192` | Model output token cap |
-| `AI_TEMPERATURE` | `0.0` | `0` ⇒ greedy/deterministic (validated) |
-| `AI_TOP_K` | `1` | Nucleus/top-k (used only if temperature > 0) |
-| `AI_TOP_P` | `1.0` | Nucleus sampling (used only if temperature > 0) |
-| `AI_SEED` | – | RNG seed (≥ 0); no effect under greedy |
-| `AI_MIN_HTML_CHARS` | `1` | Don't AI-route smaller docs |
-| `AI_MAX_HTML_CHARS` | `2000000` | Don't AI-route larger docs |
-| `AI_CACHE_OUTPUT` | `1` | Cache AI output under the `ai:` lane |
-
-Sidecar-side and build-time variables (see [`ai-converter/README-vendors.md`](ai-converter/README-vendors.md)) let you retarget other GPU vendors — `AI_BUILDER_ARGS`, `AI_PYTHON_DEPENDENCIES`, `AI_LINUX_PACKAGES`, and the `AI_RUNTIME_CFG` overlay.
-
-### The validated configuration
-
-The default sidecar settings are the ones validated end-to-end on a 16 GB RTX
-2000 Ada with CUDA 13:
-
-- **Weights:** int4 (memory-bandwidth bound; ~80% of the fp ceiling at ⅓ the VRAM).
-- **Attention:** paged attention (`use_paged_attention=true`) — eliminates the
-  dense attention-mask prefill spike and enables the continuous-batching engine.
-- **CUDA graphs:** enabled at runtime for a ~5% decode speedup.
-- **Utilization factor:** `0.9` at runtime (`gpu_utilization_factor`) to size the
-  paged-KV pool as large as the card allows, maximizing the biggest document
-  that can be converted. Lower it (0.5–0.8) via `AI_RUNTIME_CFG` if you share
-  the GPU with other CUDA-graph workloads or hit capture failures / OOM.
-- **Decoding:** greedy (temperature 0) for faithful, deterministic markdown.
-
-Approximate single-stream throughput: prefill ~8k tok/s, decode ~150–180 tok/s.
 
 ## Development
 
