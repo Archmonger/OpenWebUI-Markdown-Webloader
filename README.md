@@ -173,9 +173,8 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 | `AI_CONVERTER_ENABLED` | `0` | **Off by default** — master on/off switch for AI (ReaderLM) conversion; see [AI conversion](ai-converter/README-ai-conversion.md) |
 | `AI_SERVICE_URL` | `http://localhost:8090` | AI sidecar base URL (use `ai-converter` in compose) |
 | `AI_CONVERTER_TOKEN` | – | Shared bearer token with the AI sidecar |
-| `AI_CONVERT_TIMEOUT_MS` | `30000` | Loader→AI-sidecar timeout; exceed ⇒ native fallback |
+| `AI_CONVERT_TIMEOUT_MS` | `30000` | Loader→AI-sidecar timeout; the **only** generation stop (model runs to EOS or until this fires) ⇒ exceed ⇒ native fallback |
 | `AI_FALLBACK_ON_ERROR` | `1` | Fall back to native on any AI error (0 = surface a 500) |
-| `AI_MAX_NEW_TOKENS` | `8192` | Model output token cap |
 | `AI_TEMPERATURE` | `0.0` | `0` ⇒ greedy/deterministic (validated) |
 | `AI_TOP_K` | `1` | Nucleus/top-k (used only if temperature > 0) |
 | `AI_TOP_P` | `1.0` | Nucleus sampling (used only if temperature > 0) |

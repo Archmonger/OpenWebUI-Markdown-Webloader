@@ -57,6 +57,9 @@ services:
       PREPROCESS_MAX_ELEMENTS: ${PREPROCESS_MAX_ELEMENTS:-0}
       # Override the binary path if not using the bundled one on PATH.
       # PREPROCESS_BINARY: /usr/local/bin/dom_smoothie_cli
+      # Optional post-clean minification of the AI-path input (off by default;
+      # never affects native output). Must be set here to reach the container.
+      PREPROCESS_MINIFY_HTML: ${PREPROCESS_MINIFY_HTML:-0}
 
       # --- AI markdown conversion (OPTIONAL) ---
       # Only takes effect if you also start the `ai-converter` service
@@ -67,17 +70,24 @@ services:
       # Shared secret between loader and sidecar (keep in sync via AI_CONVERTER_TOKEN).
       AI_CONVERTER_TOKEN: ${AI_CONVERTER_TOKEN:-}
       # Loader->sidecar timeout; on exceed it falls back to native markdown.
+      # This is the ONLY generation stop factor (no token cap): the model runs
+      # to EOS or until this timeout aborts the request. Raise it if large
+      # documents are being cut off before they finish.
       AI_CONVERT_TIMEOUT_MS: ${AI_CONVERT_TIMEOUT_MS:-30000}
       # Fall back to node-html-markdown if the sidecar errors (recommended true).
       AI_FALLBACK_ON_ERROR: ${AI_FALLBACK_ON_ERROR:-true}
       # Generation controls (defaults = greedy, the validated ReaderLM recipe).
-      AI_MAX_NEW_TOKENS: ${AI_MAX_NEW_TOKENS:-8192}
       AI_TEMPERATURE: ${AI_TEMPERATURE:-0.0}
       AI_TOP_K: ${AI_TOP_K:-1}
       AI_TOP_P: ${AI_TOP_P:-1.0}
+      # Optional RNG seed (>=0); no effect under greedy. An unset value passes
+      # through as empty, which the loader treats as "no seed".
+      AI_SEED: ${AI_SEED:-}
       # Only route documents within these size bounds to the AI path.
       AI_MIN_HTML_CHARS: ${AI_MIN_HTML_CHARS:-1}
       AI_MAX_HTML_CHARS: ${AI_MAX_HTML_CHARS:-2000000}
+      # Cache AI output under the separate 'ai:' cache lane (recommended true).
+      AI_CACHE_OUTPUT: ${AI_CACHE_OUTPUT:-1}
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:14786/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -113,6 +123,9 @@ services:
       AI_MODEL_NAME: ${AI_MODEL_NAME:-ReaderLM-v2}
       # Must match the loader's AI_CONVERTER_TOKEN when one is used.
       AI_CONVERTER_TOKEN: ${AI_CONVERTER_TOKEN:-}
+      # Soft cap on queued conversions; beyond it the sidecar returns 503
+      # (busy) and the loader falls back to native — graceful overload shedding.
+      AI_MAX_QUEUE: ${AI_MAX_QUEUE:-50}
       # Runtime overlay (JSON) forwarded to the builder-provided genai config.
       # When unset, the sidecar uses its own validated default (CUDA graph
       # capture + gpu_utilization_factor=0.9). To customize — e.g. for a

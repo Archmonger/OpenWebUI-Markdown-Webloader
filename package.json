@@ -1,6 +1,6 @@
 {
   "name": "openwebui-markdown-webloader",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Open-WebUI compatible web loader engine that returns clean Markdown instead of raw HTML. Built with Bun.",
   "license": "MIT",
   "author": "Archmonger",

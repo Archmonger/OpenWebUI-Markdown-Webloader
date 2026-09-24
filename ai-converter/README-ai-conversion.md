@@ -72,15 +72,25 @@ The default sidecar settings are the ones validated end-to-end on a 16 GB RTX
 
 Approximate single-stream throughput: prefill ~8k tok/s, decode ~150–180 tok/s.
 
+**Generation length is bounded only by `AI_CONVERT_TIMEOUT_MS`.** There is no
+`AI_MAX_NEW_TOKENS` knob: a token cap and a timeout are two competing ways to
+stop the same generation, and a cap set above what the timeout can deliver just
+burns GPU on a conversion that is doomed to be abandoned and re-rendered
+natively. One knob, one stop condition — raise the timeout if large documents
+get cut off mid-conversion (at ~150–180 tok/s, 30 s ≈ 4.5–5.4k output tokens;
+60 s ≈ 9–11k).
+
 ## Post-clean minification of the AI input (opt-in)
 
 With `PREPROCESS_MINIFY_HTML=1`, the Readability-cleaned HTML is additionally
 run through the [`@minify-html/node`](https://www.npmjs.com/package/@minify-html/node)
 minifier **before** it is handed to the AI sidecar. This removes collapsible
-whitespace, comments, and empty/redundant attributes from the model's input
-(measured ~12% smaller on a large Wikipedia article, ~2-3% on a typical page),
-and because the AI's **prefill cost grows super-linearly** with input length,
-it measurably cuts AI prefill latency (~19% on a 572 KB page).
+whitespace and empty/redundant attributes from the model's input (measured ~12%
+smaller on a large Wikipedia article, ~2-3% on a typical page), and because the
+AI's **prefill cost grows super-linearly** with input length, it measurably cuts
+AI prefill latency (~19% on a 572 KB page). Comments are deliberately **kept**
+(`keep_comments` is forced on) — they are part of the fraction of bytes the
+minifier is not allowed to touch.
 
 This is safe by construction, with two invariants baked in (see
 [`src/minify.ts`](../src/minify.ts)):
@@ -90,9 +100,9 @@ This is safe by construction, with two invariants baked in (see
   tables/paragraphs. With the defaults, a Wikipedia infobox silently turns
   from a table into a blockquote and ~30% of the markdown is lost. The engine
   therefore **always** passes `keep_closing_tags` + `keep_comments`, so
-  minification only removes byte-safe whitespace/entities. The resulting
-  markdown is byte-identical to the unminified markdown on the pages that
-  matter (tables, code, `<pre>`).
+  minification only removes byte-safe whitespace/entities — comments included:
+  they survive. The resulting markdown is byte-identical to the unminified
+  markdown on the pages that matter (tables, code, `<pre>`).
 - **AI path only.** The native `node-html-markdown` renderer always consumes the
   *unminified* cleaned HTML, so this toggle can never change the markdown a
   native (non-AI) deployment serves — it only shrinks the bytes the AI model
@@ -105,10 +115,12 @@ slightly larger AI prefill. It is gated on the same `PREPROCESS_HTML` +
 `PREPROCESS_MIN_CHARS` rules as the cleaner, so tiny fragments are never
 minified.
 
-> **Cache note:** the AI output is cached under the `:ai:<url>` key, which does
-> not encode the minify setting. Toggling `PREPROCESS_MINIFY_HTML` on an already
-> cached URL serves the cached (whitespace-level) variant until the cache
-> expires or is cleared — a cold start reflects the new setting immediately.
+> **Cache note:** the AI output is cached under the `:ai:<url>` key, which
+> encodes only the output format and URL — not the minify setting or the
+> generation parameters (`AI_TEMPERATURE`, `AI_TOP_K`, `AI_TOP_P`, `AI_SEED`).
+> Changing any of those on an already-cached URL serves the cached variant
+> until the entry's TTL expires or the process restarts (the cache is
+> in-memory); uncached URLs reflect the new setting immediately.
 
 ## Sidecar-side and build-time variables
 
