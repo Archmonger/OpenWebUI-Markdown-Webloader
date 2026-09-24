@@ -41,6 +41,12 @@ irrelevant — you get the pure native loader. The `.env` default is `0` (off).
   recovers.
 - **Provenance.** Every response's `metadata.converter` reports `"native"`,
   `"ai"`, or `"fallback"` so you can see what produced the output.
+- **Pre-cleaned input.** With `PREPROCESS_HTML=1` (the default) the model sees
+  the Readability-*cleaned* HTML, and the `AI_MIN_HTML_CHARS`..`AI_MAX_HTML_CHARS`
+  size window is measured against that cleaned document. Document *metadata*
+  (title, image/link lists) is still extracted from the **raw** HTML, so nothing
+  is lost when page chrome is dropped. The `PREPROCESS_*` knobs live in the
+  Configuration table linked above.
 
 ## Per-request control
 
