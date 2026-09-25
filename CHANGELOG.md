@@ -33,19 +33,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   including `PREPROCESS_MINIFY_HTML`, `AI_CACHE_OUTPUT`, `AI_SEED`, and
   `AI_MAX_QUEUE`.
 
-### Changed
-
-- **Removed `AI_MAX_NEW_TOKENS`.** The request timeout
-  (`AI_CONVERT_TIMEOUT_MS`) is now the only generation stop factor: the model
-  runs to its EOS token or until the timeout aborts the request (native
-  fallback takes over). A token cap and a timeout are two competing ways to
-  stop the same generation; a cap above what the timeout can deliver only
-  wastes GPU on conversions doomed to be abandoned.
-- Engine version reported by `/health` now derives from `package.json`
-  instead of a hand-maintained constant.
-- Preprocessor/minifier diagnostics log at `warn` level (previously masked
-  as `info`).
-
 ### Fixed
 
 - `stripOuterCodeFence` no longer corrupts legitimate multi-fence documents.
