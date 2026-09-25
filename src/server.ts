@@ -28,9 +28,24 @@ import type {
 import { EngineError } from "./error-handler.js";
 import { resolveOptions } from "./options.js";
 import { readUrl, type UrlReadResult } from "./url-reader.js";
+import { getLastAiModel } from "./ai-converter.js";
 import { SimpleCache } from "./cache.js";
+import packageJson from "../package.json" with { type: "json" };
 
-const VERSION = "0.1.0";
+/**
+ * Engine version, taken from package.json so the two can never drift (a
+ * hand-maintained const here silently goes stale the moment a release bumps
+ * the manifest).
+ */
+const VERSION: string = packageJson.version;
+
+/**
+ * CORS `Access-Control-Allow-Headers` for every response that carries CORS
+ * headers. Single source of truth: add a new x-* option header here and both
+ * the preflight and JSON responses pick it up.
+ */
+const ALLOWED_HEADERS =
+  "content-type,authorization,x-respond-with,x-no-cache,x-target-selector,x-remove-selector,x-wait-for-selector,x-timeout,x-user-agent,x-proxy-url,x-with-images-summary,x-with-links-summary,x-ai-convert";
 
 export interface ServerHandle {
   port: number;
@@ -57,8 +72,7 @@ export function createServer(config: AppConfig): ServerHandle {
         "content-type": "application/json",
         "access-control-allow-origin": "*",
         "access-control-allow-methods": "POST,GET,OPTIONS",
-        "access-control-allow-headers":
-          "content-type,authorization,x-respond-with,x-no-cache,x-target-selector,x-remove-selector,x-wait-for-selector,x-timeout,x-user-agent,x-proxy-url,x-with-images-summary,x-with-links-summary",
+        "access-control-allow-headers": ALLOWED_HEADERS,
       },
     });
 
@@ -82,6 +96,9 @@ export function createServer(config: AppConfig): ServerHandle {
       if (result.title) response.title = result.title;
       if (result.images?.length) response.images = result.images;
       if (result.links?.length) response.links = result.links;
+      // Surface which renderer produced the markdown (native / ai / fallback)
+      // so callers can see AI provenance; absent for non-HTML and legacy cache.
+      if (result.converter) response.metadata.converter = result.converter;
       return response;
     } catch (error) {
       if (error instanceof EngineError) throw error;
@@ -121,14 +138,24 @@ export function createServer(config: AppConfig): ServerHandle {
           headers: {
             "access-control-allow-origin": "*",
             "access-control-allow-methods": "POST,GET,OPTIONS",
-            "access-control-allow-headers":
-              "content-type,authorization,x-respond-with,x-no-cache,x-target-selector,x-remove-selector,x-wait-for-selector,x-timeout,x-user-agent,x-proxy-url,x-with-images-summary,x-with-links-summary",
+            "access-control-allow-headers": ALLOWED_HEADERS,
           },
         });
       }
 
       // /health is public.
       if (path === "/health" && method === "GET") {
+        const converter: HealthResponse["converter"] = {
+          ai_enabled: config.ai.enabled,
+        };
+        if (config.ai.enabled) {
+          converter.ai_service_url = config.ai.serviceUrl;
+          converter.ai_fallback_on_error = config.ai.fallbackOnError;
+          // Populated after the first successful conversion; not fetched here
+          // so /health never depends on the sidecar being reachable.
+          const model = getLastAiModel();
+          if (model) converter.ai_model = model;
+        }
         const body: HealthResponse = {
           status: "ok",
           version: VERSION,
@@ -139,6 +166,7 @@ export function createServer(config: AppConfig): ServerHandle {
             maxPdfPages: config.maxPdfPages,
             requestTimeoutMs: config.requestTimeoutMs,
           },
+          converter,
         };
         return json(200, body);
       }
@@ -200,6 +228,9 @@ export function createServer(config: AppConfig): ServerHandle {
                     metadata: { source: target },
                   };
                   if (result.title) doc.metadata.title = result.title;
+                  // Additive AI provenance; Open-WebUI ignores unknown keys.
+                  if (result.converter)
+                    doc.metadata.converter = result.converter;
                   return doc;
                 } catch (error) {
                   // Continue on failure: skip failed URLs so a partial success

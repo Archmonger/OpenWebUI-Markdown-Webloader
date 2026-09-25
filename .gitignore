@@ -23,3 +23,5 @@ Thumbs.db
 
 # Test / runtime
 *.tsbuildinfo
+__pycache__/
+*.pyc

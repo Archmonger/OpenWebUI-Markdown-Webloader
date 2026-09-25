@@ -8,13 +8,15 @@
  * rather than the bare Markdown string so a cache hit can re-attach the same
  * metadata (page title, image/link lists) a fresh fetch would have produced.
  */
-import type { ImageInfo, LinkInfo } from "./types.js";
+import type { ConverterKind, ImageInfo, LinkInfo } from "./types.js";
 
 export interface CacheDocument {
   full: string;
   title?: string;
   images?: ImageInfo[];
   links?: LinkInfo[];
+  /** Which converter produced `full` (HTML only); omitted for legacy entries. */
+  converter?: ConverterKind;
 }
 
 interface CacheEntry {

@@ -30,6 +30,20 @@ function readInt(headers: Headers, name: string): number | undefined {
 }
 
 /**
+ * Tri-state boolean from a header: returns undefined when the header is absent
+ * (so the caller can fall through to server config), true for `true`/`1`, and
+ * false for `false`/`0`.
+ */
+function readOptionalBool(headers: Headers, name: string): boolean | undefined {
+  const value = headers.get(name);
+  if (value === null) return undefined;
+  const v = value.trim().toLowerCase();
+  if (v === "true" || v === "1") return true;
+  if (v === "false" || v === "0") return false;
+  return undefined;
+}
+
+/**
  * Build resolved options from defaults + headers + body options.
  * Precedence (highest wins): body options > x-* headers > engine defaults.
  */
@@ -65,6 +79,12 @@ export function resolveOptions(
   const withLinks =
     bodyOptions?.withLinks ?? readBool(headers, "x-with-links-summary");
 
+  // Tri-state AI intent: only a per-request `false` overrides the server-wide
+  // switch (a request cannot force the AI service on when it is not
+  // provisioned). Body option wins over the header.
+  const aiConvert =
+    bodyOptions?.aiConvert ?? readOptionalBool(headers, "x-ai-convert");
+
   // A per-request timeout, when given, can never exceed a sane ceiling so a
   // misbehaving client cannot pin a worker thread for hours.
   const resolvedTimeout =
@@ -81,5 +101,6 @@ export function resolveOptions(
     proxyUrl,
     withImages,
     withLinks,
+    aiConvert,
   };
 }

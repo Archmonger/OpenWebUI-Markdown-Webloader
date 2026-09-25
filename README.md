@@ -12,6 +12,7 @@ Built on [Bun](https://bun.sh) — the package manager, test runner, and runtime
 
 - **Open-WebUI compatible** — speaks the exact `ExternalWebLoader` contract (`POST /` with `{"urls":[...]}` → `[{page_content, metadata}]`), so it plugs straight into Open-WebUI's `EXTERNAL_WEB_LOADER_URL`.
 - **Markdown, not HTML** — HTML/XHTML → Markdown via `node-html-markdown`; JSON → pretty-printed `json` fence; XML/YAML/TOML/plain text → fenced blocks; PDFs → extracted text.
+- **Readability pre-cleaning (on by default)** — every HTML page is first stripped of navigation/header/footer boilerplate with [`dom_smoothie`](https://github.com/niklak/dom_smoothie) (a Rust port of Mozilla Readability) before it reaches *either* renderer, so both the native and AI paths get focused, article-only content. Fully optional and self-healing (falls back to raw HTML); tune it with the `PREPROCESS_*` rows in [Configuration](#configuration).
 - **Content-type aware** — JSON is pretty-printed, structured text is fenced with the right language, binary/media/archive downloads are intentionally rejected (with an explanatory message).
 - **SSRF protection** — rejects private/loopback/link-local/multicast and IPv6 ULA addresses, plus a DNS-rebinding guard that re-validates every resolved address. Cloud-metadata (`169.254.169.254`) and internal-only fetches are blocked by default.
 - **Safety limits** — 5 MB body cap (configurable), binary NUL-byte sniffing of the first 1 KiB, PDF page-count and text-size caps, request timeouts, and redirect-loop protection.
@@ -138,6 +139,7 @@ curl http://localhost:14786/health
 | `x-remove-selector` | CSS selector | (reserved) remove matching elements |
 | `x-with-images-summary` | `true` | Include an image list in `/load` |
 | `x-with-links-summary` | `true` | Include a link list in `/load` |
+| `x-ai-convert` | `0` / `false` | Per-request **opt-out** of AI conversion (see [AI conversion](ai-converter/README-ai-conversion.md#per-request-control)). Only meaningful when the AI feature is enabled server-wide. |
 
 ## Configuration
 
@@ -162,16 +164,44 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 | `ALLOW_PRIVATE_URLS` | `false` | **Disable SSRF protection — never on a public server** |
 | `PROXY_URL` / `NO_PROXY` | – | Egress proxy config (undici `ProxyAgent`) |
 | `LOG_LEVEL` | `info` | `off` \| `error` \| `warn` \| `info` \| `debug` |
+| `PREPROCESS_HTML` | `1` | **On by default** — Readability pre-clean HTML before both renderers |
+| `PREPROCESS_TIMEOUT_MS` | `3000` | Per-document cleaner timeout; exceed ⇒ raw HTML |
+| `PREPROCESS_MIN_CHARS` | `800` | Skip documents smaller than this |
+| `PREPROCESS_MAX_ELEMENTS` | `0` | Cap DOM elements cleaned (`0` = unlimited) |
+| `PREPROCESS_BINARY` | `dom_smoothie_cli` | Path to the cleaner binary (bundled on PATH) |
+| `PREPROCESS_MINIFY_HTML` | `0` | **Off by default** — also minify the cleaned HTML before the **AI** path (shrinks the model input; never touches native output; see [AI conversion](ai-converter/README-ai-conversion.md#post-clean-minification-of-the-ai-input-opt-in)) |
+| `AI_CONVERTER_ENABLED` | `0` | **Off by default** — master on/off switch for AI (ReaderLM) conversion; see [AI conversion](ai-converter/README-ai-conversion.md) |
+| `AI_SERVICE_URL` | `http://localhost:8090` | AI sidecar base URL (use `ai-converter` in compose) |
+| `AI_CONVERTER_TOKEN` | – | Shared bearer token with the AI sidecar |
+| `AI_CONVERT_TIMEOUT_MS` | `30000` | Loader→AI-sidecar timeout; the **only** generation stop (model runs to EOS or until this fires) ⇒ exceed ⇒ native fallback |
+| `AI_FALLBACK_ON_ERROR` | `1` | Fall back to native on any AI error (0 = surface a 500) |
+| `AI_TEMPERATURE` | `0.0` | `0` ⇒ greedy/deterministic (validated) |
+| `AI_TOP_K` | `1` | Nucleus/top-k (used only if temperature > 0) |
+| `AI_TOP_P` | `1.0` | Nucleus sampling (used only if temperature > 0) |
+| `AI_SEED` | – | RNG seed (≥ 0); no effect under greedy |
+| `AI_MIN_HTML_CHARS` | `1` | Don't AI-route documents smaller than this |
+| `AI_MAX_HTML_CHARS` | `2000000` | Don't AI-route documents larger than this |
+| `AI_CACHE_OUTPUT` | `1` | Cache AI output under the separate `ai:` lane |
 
 ## How it converts content
 
 | Content-Type | Output |
 |--------------|--------|
-| `text/html`, `application/xhtml+xml` | Markdown (`node-html-markdown`) |
+| `text/html`, `application/xhtml+xml` | Markdown (`node-html-markdown`, or **AI** if enabled) |
 | `application/json`, `*+json` | Pretty-printed `json` fence |
 | `text/*`, `+xml`, `yaml`, `toml` | Fenced block tagged with the language |
 | `application/pdf` | Extracted text in a `text` fence (no OCR) |
 | binary / media / archives | Rejected with an explanatory message |
+
+When **AI conversion** is enabled (`AI_CONVERTER_ENABLED=1`), HTML documents are
+additionally routed to an optional [ReaderLM-v2](https://huggingface.co/jinaai/ReaderLM-v2)
+GPU sidecar for an LLM-grade Markdown conversion, always with a native
+`node-html-markdown` fallback. Everything is opt-in: without it, the engine is
+a pure native loader and no AI dependency is installed or contacted. Enabling,
+per-request control, the validated GPU configuration, and the optional
+post-clean AI-input minification are documented in
+[**ai-converter/README-ai-conversion.md**](ai-converter/README-ai-conversion.md)
+(sidecar/vendor build knobs: [ai-converter/README-vendors.md](ai-converter/README-vendors.md)).
 
 ## Development
 
@@ -179,6 +209,20 @@ All configuration is via environment (12-factor). See [`.env.example`](.env.exam
 bun install
 bun run typecheck   # tsc --noEmit
 bun run lint        # biome check src tests
-bun test            # 83 unit + integration tests (bun test)
+bun test            # unit + integration tests (bun test)
 bun run tests/smoke.ts   # end-to-end smoke against a local fixture
+```
+
+The optional HTML pre-cleaner's real-binary integration test is skipped unless
+you point it at a built `dom_smoothie_cli`:
+
+```bash
+PREPROCESS_TEST_BINARY=/path/to/dom_smoothie_cli bun test tests/preprocess.test.ts
+```
+
+The optional AI sidecar has its own GPU-free tests (they stub
+`onnxruntime_genai`), runnable anywhere Python 3 is present:
+
+```bash
+cd ai-converter && python3 -m unittest discover -v
 ```

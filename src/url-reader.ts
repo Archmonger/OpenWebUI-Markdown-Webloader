@@ -20,7 +20,15 @@
 import { fetch as undiciFetch, type Dispatcher } from "undici";
 import { parse as parseHtml } from "node-html-parser";
 import type { AppConfig } from "./config.js";
-import type { ImageInfo, LinkInfo, ResolvedOptions } from "./types.js";
+import type {
+  ConverterKind,
+  ImageInfo,
+  LinkInfo,
+  ResolvedOptions,
+} from "./types.js";
+import { aiShouldAttempt, maybeAiConvert } from "./ai-converter.js";
+import { preprocessHtml } from "./preprocess.js";
+import { minifyHtml } from "./minify.js";
 import {
   createContentError,
   createConversionError,
@@ -59,6 +67,8 @@ export interface UrlReadResult {
   byteLength: number;
   cached: boolean;
   processingTimeMs: number;
+  /** Which renderer produced this markdown (HTML only). */
+  converter?: ConverterKind;
 }
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
@@ -67,6 +77,21 @@ const BINARY_SNIFF_PREFIX_BYTES = 1024;
 /** Cache key: output format plus URL (so formats do not collide). */
 export function cacheKeyFor(url: string, options: ResolvedOptions): string {
   return `${options.respondWith}:${url}`;
+}
+
+/**
+ * Cache key for an AI-converted document. Namespaced so an AI result and the
+ * native result for the same URL never shadow each other.
+ *
+ * Known staleness trade-off: the key encodes the output format and URL only —
+ * not the AI generation parameters (temperature, top-k/p, seed) or the minify
+ * toggle. Changing those server settings therefore does NOT invalidate cached
+ * AI documents; a new setting only takes effect for uncached URLs or once the
+ * entry's TTL expires (restart also clears it, as the cache is in-memory).
+ * Accepting this keeps the key (and thus hit rates) stable across requests.
+ */
+export function aiCacheKeyFor(url: string, options: ResolvedOptions): string {
+  return `${options.respondWith}:ai:${url}`;
 }
 
 export async function readUrl(
@@ -89,26 +114,23 @@ export async function readUrl(
   // Static SSRF check on the literal hostname.
   assertUrlAllowed(parsedUrl, config.allowPrivateUrls);
 
+  // When the AI lane is active for this request, consult it first so a cached
+  // AI result is served without a re-fetch. The native lane is then consulted
+  // as a fallback (it holds every non-HTML document and any prior native HTML,
+  // including a cached "fallback" produced while the AI service was down).
+  const aiActiveForRequest = config.ai.enabled && options.aiConvert !== false;
   if (!options.noCache) {
+    if (aiActiveForRequest) {
+      const aiCached = cache.get(aiCacheKeyFor(url, options));
+      if (aiCached !== null) {
+        log(config, "debug", `AI cache hit for ${url}`);
+        return cachedResult(url, aiCached, "ai", options, started);
+      }
+    }
     const cached: CacheDocument | null = cache.get(cacheKeyFor(url, options));
     if (cached !== null) {
       log(config, "debug", `cache hit for ${url}`);
-      const content = applyPaginationOptions(cached.full, NO_PAGINATION);
-      const result: UrlReadResult = {
-        url,
-        content,
-        cached: true,
-        byteLength: 0,
-        processingTimeMs: Date.now() - started,
-      };
-      // Re-attach the same metadata a fresh fetch would have produced so a
-      // cache hit is indistinguishable from a miss (except for timing).
-      if (cached.title) result.title = cached.title;
-      if (options.withImages && cached.images?.length)
-        result.images = cached.images;
-      if (options.withLinks && cached.links?.length)
-        result.links = cached.links;
-      return result;
+      return cachedResult(url, cached, cached.converter, options, started);
     }
   }
 
@@ -153,19 +175,34 @@ export async function readUrl(
       options,
       config,
     );
-    if (!options.noCache) {
-      // Store an envelope, not the bare Markdown, so a later cache hit can
-      // re-attach the title / image / link metadata without re-fetching.
+    // Persist under the lane that actually produced the markdown so the AI and
+    // native results never shadow one another. Store an envelope, not the bare
+    // Markdown, so a later cache hit can re-attach title / image / link
+    // metadata without re-fetching. Two deliberate exceptions:
+    //   * A `fallback` result is NOT cached. It is only what we produced because
+    //     the AI service failed this time; caching it would pin the degraded
+    //     rendering even after the service recovers. A later request retries.
+    //   * When `cacheAiOutput` is off, the AI result is simply not stored, so
+    //     the native rendering (if any) and the AI result never both accumulate.
+    if (!options.noCache && converted.converter !== "fallback") {
       const doc: CacheDocument = { full: converted.full };
       if (converted.title) doc.title = converted.title;
       if (converted.images?.length) doc.images = converted.images;
       if (converted.links?.length) doc.links = converted.links;
-      cache.set(cacheKeyFor(url, options), doc);
+      if (converted.converter) doc.converter = converted.converter;
+      if (converted.converter === "ai") {
+        if (config.ai.cacheAiOutput) {
+          cache.set(aiCacheKeyFor(url, options), doc);
+        }
+      } else {
+        cache.set(cacheKeyFor(url, options), doc);
+      }
     }
     log(
       config,
       "info",
-      `fetched ${url} (${converted.content.length} chars in ${converted.processingTimeMs}ms)`,
+      `fetched ${url} (${converted.content.length} chars in ${converted.processingTimeMs}ms` +
+        `${converted.converter ? `, converter=${converted.converter}` : ""})`,
     );
     const result: UrlReadResult = {
       url: converted.url,
@@ -176,6 +213,7 @@ export async function readUrl(
       byteLength: converted.byteLength,
       cached: false,
       processingTimeMs: converted.processingTimeMs,
+      converter: converted.converter,
     };
     return result;
   } catch (error) {
@@ -183,6 +221,30 @@ export async function readUrl(
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+/** Build a cache-hit `UrlReadResult` from a stored envelope. */
+function cachedResult(
+  url: string,
+  cached: CacheDocument,
+  converter: ConverterKind | undefined,
+  options: ResolvedOptions,
+  started: number,
+): UrlReadResult {
+  const content = applyPaginationOptions(cached.full, NO_PAGINATION);
+  const result: UrlReadResult = {
+    url,
+    content,
+    cached: true,
+    byteLength: 0,
+    processingTimeMs: Date.now() - started,
+  };
+  if (converter) result.converter = converter;
+  if (cached.title) result.title = cached.title;
+  if (options.withImages && cached.images?.length)
+    result.images = cached.images;
+  if (options.withLinks && cached.links?.length) result.links = cached.links;
+  return result;
 }
 
 // ---- Fetch + redirect handling ------------------------------------------
@@ -384,6 +446,7 @@ type ConvertedContent =
       title?: string;
       images?: ImageInfo[];
       links?: LinkInfo[];
+      converter?: ConverterKind;
     }
   | { kind: "message"; text: string };
 
@@ -442,7 +505,11 @@ async function convertResponse(
       throw createContentError("Website returned empty content.", url);
     }
     byteLength = text.bytesRead;
-    converted = convertText(text.text, classification, url);
+    if (classification.kind === "html") {
+      converted = await convertHtmlContent(text.text, url, options, config);
+    } else {
+      converted = convertText(text.text, classification, url);
+    }
   }
 
   // What we cache: the full markdown (or the failure message), so pagination
@@ -475,6 +542,96 @@ async function convertResponse(
     byteLength,
     cached: false,
     processingTimeMs: Date.now() - started,
+    converter: converted.kind === "markdown" ? converted.converter : undefined,
+  };
+}
+
+/**
+ * Convert an HTML document to Markdown, preferring the AI (ReaderLM) converter
+ * when enabled for this request, and always falling back to the native
+ * `node-html-markdown` renderer. Metadata (title/images/links) is always taken
+ * from the RAW HTML via the native extractors so it is present regardless of
+ * which renderer produced the body text.
+ *
+ * When `PREPROCESS_HTML` is enabled (default), the document is first run
+ * through the `dom_smoothie` Readability cleaner and BOTH renderers consume the
+ * cleaned HTML. This keeps the two paths comparable and gives the model a
+ * smaller, article-only input. The cleaner never loses content: if it fails or
+ * is unavailable it returns the original HTML, so the conversion still runs.
+ * The AI size gate is evaluated against the CLEANED length, which is what the
+ * model will actually be sent.
+ *
+ * When `PREPROCESS_MINIFY_HTML` is enabled, the AI path additionally runs the
+ * cleaner's output through the `@minify-html/node` minifier (with its safe,
+ * structure-preserving options) so the model prefills fewer bytes. The native
+ * renderer keeps consuming the unminified `cleaned` HTML, so toggling this
+ * can only change the AI path's input, never the markdown a native deployment
+ * serves. The minifier is a native addon that degrades to the unminified HTML
+ * if it is missing or fails, so it can never break a conversion. The AI size
+ * gate is evaluated against the CLEANED length (the minify step runs after the
+ * gate, so a document that is too large is never sent minified to a model that
+ * would reject it anyway).
+ */
+async function convertHtmlContent(
+  html: string,
+  url: string,
+  options: ResolvedOptions,
+  config: AppConfig,
+): Promise<ConvertedContent> {
+  // Metadata from the RAW document so titles/images/links are never lost even
+  // if Readability drops them during cleaning.
+  const meta = nativeHtmlMetadata(html);
+
+  // Pre-clean once; shared by the native and AI paths. Falls back to `html`.
+  const cleaned = await preprocessHtml(html, url, config, (level, msg) =>
+    log(config, level, msg),
+  );
+
+  const nativeMarkdown = renderNativeHtmlMarkdown(cleaned, url);
+
+  if (!aiShouldAttempt(config, options, cleaned.length)) {
+    return {
+      kind: "markdown",
+      markdown: nativeMarkdown,
+      ...meta,
+      converter: "native",
+    };
+  }
+  // Shrink the AI input (opt-in). The native renderer above already ran on the
+  // unminified `cleaned`; only the bytes handed to the model are minified. This
+  // is a no-op that returns `cleaned` when minify is off or the addon is absent.
+  const aiInput = await minifyHtml(cleaned, config, (level, msg) =>
+    log(config, level, msg),
+  );
+  const { markdown, converter } = await maybeAiConvert(
+    aiInput,
+    nativeMarkdown,
+    url,
+    config,
+    (level, msg) => log(config, level, msg),
+  );
+  return { kind: "markdown", markdown, ...meta, converter };
+}
+
+/** Native HTML→markdown; throws a conversion error on failure (unchanged). */
+function renderNativeHtmlMarkdown(html: string, url: string): string {
+  try {
+    return htmlToMarkdown(html);
+  } catch {
+    throw createConversionError(url);
+  }
+}
+
+/** Title/image/link extraction straight from the HTML (renderer-agnostic). */
+function nativeHtmlMetadata(html: string): {
+  title?: string;
+  images?: ImageInfo[];
+  links?: LinkInfo[];
+} {
+  return {
+    title: extractTitle(html),
+    images: extractImages(html),
+    links: extractLinks(html),
   };
 }
 
@@ -671,7 +828,7 @@ function extractLinks(html: string, limit = 100): LinkInfo[] {
 
 function log(
   config: AppConfig,
-  level: "info" | "debug",
+  level: "warn" | "info" | "debug",
   message: string,
 ): void {
   const order = { off: 0, error: 1, warn: 2, info: 3, debug: 4 } as const;
