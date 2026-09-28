@@ -62,9 +62,10 @@ bun run dev          # watch mode
 
 Connect **Open-WebUI**:
 
-1. `Admin Settings → Web Loader`.
-2. Set `EXTERNAL_WEB_LOADER_URL` to `http://<host-or-service>:14786`.
-3. Set `EXTERNAL_WEB_LOADER_API_KEY` to the `API_KEY` you configured (or leave both empty for no auth).
+1. `Admin Panel → Settings → Documents`.
+2. Set Web Loader to `External`
+3. Set `Web Loader URL` to `http://<host-or-service>:14786`.
+4. Set `API Key` to the `API_KEY` you configured (or leave both empty for no auth).
 
 ## API
 
