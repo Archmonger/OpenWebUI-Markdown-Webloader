@@ -2,6 +2,7 @@
 
 An [Open-WebUI](https://github.com/open-webui/open-webui)-compatible **web loader engine** that fetches a URL and returns clean **Markdown** instead of raw HTML.
 
+> [!NOTE]
 > **Why Markdown?** This project exists to improve LLM understanding of web content. LLMs are notably better at comprehending Markdown than raw HTML, JS, and CSS — all the scaffolding, inline styles, scripts, and markup noise get stripped away, leaving the semantic content and structure (`#` headings, `[links]`, `**emphasis**`, lists, et cetera) that a model can reason over most effectively. Feeding a model Markdown instead of a wall of tags reduces token waste and measurably improves retrieval and summarization quality in RAG pipelines and web-from-web agent workflows.
 
 Built on [Bun](https://bun.sh) — the package manager, test runner, and runtime.
