@@ -33,6 +33,10 @@ docker run -d \
   ghcr.io/archmonger/openwebui-markdown-webloader:latest
 ```
 
+The published image is a multi-arch manifest covering `linux/amd64` and
+`linux/arm64`, so Docker automatically pulls the right variant on Intel/AMD
+servers, Apple Silicon Macs, and arm64 hosts (issue #4).
+
 ### Docker Compose
 
 ```yaml

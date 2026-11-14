@@ -6,9 +6,6 @@ import {
   expect,
   test,
 } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { loadConfig, type AppConfig } from "../src/config.js";
 import { resolveOptions } from "../src/options.js";
 import {
@@ -18,6 +15,15 @@ import {
 } from "../src/minify.js";
 import { readUrl } from "../src/url-reader.js";
 import { SimpleCache } from "../src/cache.js";
+import { makeFakeCli } from "./helpers/fake-cli.js";
+
+// `@minify-html/node` ships prebuilt addons for darwin/linux x64+arm64 and
+// win32-x64, but not win32-arm64. When the addon is unavailable `minifyHtml`
+// correctly degrades to the original HTML, so only the tests that assert real
+// minification are skipped on those runners.
+const minifyAddon = await import("@minify-html/node").catch(() => null);
+const addonAvailable = typeof minifyAddon?.minify === "function";
+const needsAddon = test.skipIf(!addonAvailable);
 
 /**
  * A deterministic fixture document: large enough to clear `PREPROCESS_MIN_CHARS`,
@@ -49,13 +55,9 @@ function cfg(extra: Record<string, string> = {}): AppConfig {
   } as NodeJS.ProcessEnv);
 }
 
-/** An executable script that reads stdin and writes it back unchanged. */
+/** A native executable (compiled once per test process) that echoes stdin. */
 function makePassthrough(name: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `minify-${name}-`));
-  const path = join(dir, name);
-  writeFileSync(path, "#!/usr/bin/env bash\ncat\n");
-  chmodSync(path, 0o755);
-  return path;
+  return makeFakeCli(name, { mode: "passthrough" });
 }
 
 afterEach(() => {
@@ -138,27 +140,33 @@ describe("minifyHtml: behavior", () => {
     expect(out).toBe(FIXTURE_HTML);
   });
 
-  test("enabled -> shrinks the input (collapsible whitespace removed)", async () => {
-    const out = await minifyHtml(
-      FIXTURE_HTML,
-      cfg({ PREPROCESS_MINIFY_HTML: "1" }),
-    );
-    expect(out).not.toBe(FIXTURE_HTML);
-    expect(out.length).toBeLessThan(FIXTURE_HTML.length);
-  });
+  needsAddon(
+    "enabled -> shrinks the input (collapsible whitespace removed)",
+    async () => {
+      const out = await minifyHtml(
+        FIXTURE_HTML,
+        cfg({ PREPROCESS_MINIFY_HTML: "1" }),
+      );
+      expect(out).not.toBe(FIXTURE_HTML);
+      expect(out.length).toBeLessThan(FIXTURE_HTML.length);
+    },
+  );
 
-  test("safe options are forced: closing tags survive minification", async () => {
-    const out = await minifyHtml(
-      FIXTURE_HTML,
-      cfg({ PREPROCESS_MINIFY_HTML: "1" }),
-    );
-    // The minifier's DEFAULTS drop optional closing tags; our forced
-    // keep_closing_tags must preserve them so downstream structure is intact.
-    expect(out).toContain("</td>");
-    expect(out).toContain("</tr>");
-    expect(out).toContain("</p>");
-    expect(out).toContain("</pre>");
-  });
+  needsAddon(
+    "safe options are forced: closing tags survive minification",
+    async () => {
+      const out = await minifyHtml(
+        FIXTURE_HTML,
+        cfg({ PREPROCESS_MINIFY_HTML: "1" }),
+      );
+      // The minifier's DEFAULTS drop optional closing tags; our forced
+      // keep_closing_tags must preserve them so downstream structure is intact.
+      expect(out).toContain("</td>");
+      expect(out).toContain("</tr>");
+      expect(out).toContain("</p>");
+      expect(out).toContain("</pre>");
+    },
+  );
 
   test("empty output -> returns the original (never returns empty)", async () => {
     const onlyWhitespace = "   \n  \n  ";
@@ -248,32 +256,35 @@ describe("readUrl: minify feeds the AI input, never the native output", () => {
     fixtureStop?.();
   });
 
-  test("minify ON -> the sidecar receives minified (smaller, closing-tag-preserving) HTML", async () => {
-    const stub = makeAiStub();
-    const c = cfg({
-      PREPROCESS_HTML: "1",
-      PREPROCESS_BINARY: passthrough,
-      PREPROCESS_MIN_CHARS: "1",
-      PREPROCESS_MINIFY_HTML: "1",
-      AI_CONVERTER_ENABLED: "1",
-      AI_SERVICE_URL: stub.url,
-    });
-    const r = await readUrl(
-      `${base}/html`,
-      resolveOptions(new Headers()),
-      c,
-      new SimpleCache(60_000, 10),
-    );
-    expect(r.converter).toBe("ai");
-    expect(stub.state.calls).toBe(1);
-    const aiInput = stub.state.lastBody?.html ?? "";
-    // The model received a strictly smaller payload than the raw document ...
-    expect(aiInput.length).toBeLessThan(FIXTURE_HTML.length);
-    // ... yet the safe options kept the structure the parser depends on.
-    expect(aiInput).toContain("</td>");
-    expect(aiInput).toContain("</tr>");
-    stub.server.stop(true);
-  });
+  needsAddon(
+    "minify ON -> the sidecar receives minified (smaller, closing-tag-preserving) HTML",
+    async () => {
+      const stub = makeAiStub();
+      const c = cfg({
+        PREPROCESS_HTML: "1",
+        PREPROCESS_BINARY: passthrough,
+        PREPROCESS_MIN_CHARS: "1",
+        PREPROCESS_MINIFY_HTML: "1",
+        AI_CONVERTER_ENABLED: "1",
+        AI_SERVICE_URL: stub.url,
+      });
+      const r = await readUrl(
+        `${base}/html`,
+        resolveOptions(new Headers()),
+        c,
+        new SimpleCache(60_000, 10),
+      );
+      expect(r.converter).toBe("ai");
+      expect(stub.state.calls).toBe(1);
+      const aiInput = stub.state.lastBody?.html ?? "";
+      // The model received a strictly smaller payload than the raw document ...
+      expect(aiInput.length).toBeLessThan(FIXTURE_HTML.length);
+      // ... yet the safe options kept the structure the parser depends on.
+      expect(aiInput).toContain("</td>");
+      expect(aiInput).toContain("</tr>");
+      stub.server.stop(true);
+    },
+  );
 
   test("minify OFF -> the sidecar receives the unminified cleaned HTML", async () => {
     const stub = makeAiStub();
