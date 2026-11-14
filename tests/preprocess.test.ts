@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, type AppConfig } from "../src/config.js";
 import { preprocessHtml, preprocessShouldRun } from "../src/preprocess.js";
+import { makeFakeCli } from "./helpers/fake-cli.js";
 
 // Helper: build a config from env (PREPROCESS_* knobs map straight through, so
 // binaryPath/timeout/min/max can all be driven from a plain env object).
@@ -11,16 +12,8 @@ function cfg(env: Record<string, string>): AppConfig {
   return loadConfig(env as NodeJS.ProcessEnv);
 }
 
-// Create an executable shell "binary" that emulates the `dom_smoothie_cli`
-// contract (reads an HTML doc on stdin, writes cleaned HTML on stdout). Each
-// script is written into a fresh temp dir so tests stay isolated.
-function makeScript(name: string, body: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `pp-${name}-`));
-  const path = join(dir, name);
-  writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
-  chmodSync(path, 0o755);
-  return path;
-}
+// A native executable (compiled once per test process) that emulates the
+// `dom_smoothie_cli` contract. Unlike a bash script it also runs on Windows.
 
 describe("loadConfig: PREPROCESS_* defaults", () => {
   test("preprocessing is ON by default with the CLI on PATH", () => {
@@ -104,15 +97,7 @@ describe("preprocessHtml: decision short-circuits (no spawn needed)", () => {
 describe("preprocessHtml: real CLI contract via emulated binaries", () => {
   test("cleans via stdin->stdout and forwards document-url", async () => {
     const argsLog = join(mkdtempSync(join(tmpdir(), "pp-clean-")), "args.txt");
-    // Bake the absolute log path into the script (no env indirection). Echo the
-    // received argv, then transform each stdin line to prove it flowed through.
-    const bin = makeScript(
-      "cleaner.sh",
-      [
-        `printf '%s\\n' "$*" > ${JSON.stringify(argsLog)}`,
-        `sed 's#<body>#<body data-cleaned="1">#'`,
-      ].join("\n"),
-    );
+    const bin = makeFakeCli("cleaner", { mode: "clean", argsLog });
     const c = cfg({
       PREPROCESS_HTML: "1",
       PREPROCESS_MIN_CHARS: "10",
@@ -130,10 +115,7 @@ describe("preprocessHtml: real CLI contract via emulated binaries", () => {
 
   test("max-elements>0 adds the --max-elements arg; 0 omits it", async () => {
     const argsLog = join(mkdtempSync(join(tmpdir(), "pp-max-")), "args.txt");
-    const bin = makeScript(
-      "cap.sh",
-      `printf '%s\\n' "$*" > ${JSON.stringify(argsLog)}; cat`,
-    );
+    const bin = makeFakeCli("cap", { mode: "log-args", argsLog });
     const withCap = cfg({
       PREPROCESS_HTML: "1",
       PREPROCESS_MIN_CHARS: "10",
@@ -164,7 +146,7 @@ describe("preprocessHtml: real CLI contract via emulated binaries", () => {
   });
 
   test("non-zero exit -> falls back to original html (never throws)", async () => {
-    const bin = makeScript("fail.sh", "exit 3");
+    const bin = makeFakeCli("fail", { mode: "fail" });
     const c = cfg({
       PREPROCESS_HTML: "1",
       PREPROCESS_MIN_CHARS: "10",
@@ -175,7 +157,7 @@ describe("preprocessHtml: real CLI contract via emulated binaries", () => {
   });
 
   test("empty stdout -> falls back to original html", async () => {
-    const bin = makeScript("empty.sh", "cat >/dev/null"); // consumes stdin, prints nothing
+    const bin = makeFakeCli("empty", { mode: "empty" }); // consumes stdin, prints nothing
     const c = cfg({
       PREPROCESS_HTML: "1",
       PREPROCESS_MIN_CHARS: "10",
@@ -186,7 +168,7 @@ describe("preprocessHtml: real CLI contract via emulated binaries", () => {
   });
 
   test("whitespace-only stdout is treated as empty -> fallback", async () => {
-    const bin = makeScript("ws.sh", "printf '   \\n  \\n'");
+    const bin = makeFakeCli("ws", { mode: "whitespace" });
     const c = cfg({
       PREPROCESS_HTML: "1",
       PREPROCESS_MIN_CHARS: "10",
@@ -197,8 +179,8 @@ describe("preprocessHtml: real CLI contract via emulated binaries", () => {
   });
 
   test("timeout -> kills the wedged child and returns original html", async () => {
-    // Script that reads stdin then hangs well past our 200 ms budget.
-    const bin = makeScript("slow.sh", "cat >/dev/null; sleep 30");
+    // Program that reads stdin then hangs well past our 200 ms budget.
+    const bin = makeFakeCli("slow", { mode: "hang" });
     const c = cfg({
       PREPROCESS_HTML: "1",
       PREPROCESS_MIN_CHARS: "10",

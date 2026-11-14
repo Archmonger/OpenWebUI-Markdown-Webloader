@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The GHCR image is now published as a multi-arch manifest for
+  `linux/amd64` and `linux/arm64`. Each variant is built on a native runner
+  and the digests are merged, so `docker pull` works on Apple Silicon and
+  arm64 hosts instead of failing with "no matching manifest for
+  linux/arm64/v8" (issue #4).
+
 ## [0.2.0] - 2026-09-24
 
 ### Added

@@ -1,0 +1,217 @@
+name: Cross-Platform CI
+
+# Validates the engine and the Docker image on every architecture GitHub
+# Actions offers for public repositories:
+#
+#   linux/amd64   ubuntu-latest      linux/arm64   ubuntu-24.04-arm
+#   macos/x64     macos-15-intel     macos/arm64   macos-15
+#   windows/x64   windows-latest     windows/arm64 windows-11-arm
+#
+# The Docker job builds each image on a *native* runner and runs it end to end,
+# including the static `dom_smoothie_cli` binary. That is the regression guard
+# for issue #4: an arm64 image that silently contains an x64 cleaner would fall
+# back to raw HTML, leaving nav/footer chrome in the markdown.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - runner: macos-15-intel
+            platform: macos-x64
+          - runner: macos-15
+            platform: macos-arm64
+          - runner: windows-latest
+            platform: windows-x64
+          - runner: windows-11-arm
+            platform: windows-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint (Biome)
+        run: bun run lint
+
+      # Includes the preprocessing tests, which spawn a compiled native fake
+      # `dom_smoothie_cli` (see tests/helpers/fake-cli.ts) so the suite runs on
+      # Windows too. Tests needing the `@minify-html/node` addon are skipped on
+      # platforms where it has no prebuilt binary (win32-arm64).
+      - name: Unit + integration tests
+        run: bun test
+
+      - name: End-to-end smoke
+        run: bun run tests/smoke.ts
+
+  docker:
+    name: Docker (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Native build: the runner's own architecture is the target platform, so
+      # the Rust cleaner is compiled at full speed instead of under QEMU.
+      - name: Build image
+        run: docker buildx build --platform "${{ matrix.platform }}" --load -t webloader:ci .
+
+      - name: Verify image architecture
+        run: |
+          got="$(docker image inspect --format '{{.Architecture}}' webloader:ci)"
+          echo "image architecture: $got"
+          test "$got" = "${{ matrix.arch }}"
+
+      # Executes the static cleaner directly inside the image. A binary built
+      # for the wrong architecture fails here with "exec format error".
+      - name: Run dom_smoothie_cli inside the image
+        run: |
+          body="$(printf 'Body sentence number %s for the readability extractor. ' $(seq 1 40))"
+          printf '<html><head><title>Cleaner</title></head><body><nav>nav</nav><article><h1>Cleaner Heading</h1><p>%s</p></article></body></html>' "$body" \
+            | docker run --rm -i webloader:ci \
+                dom_smoothie_cli --stdout -f html --document-url https://example.test/ \
+            > "$RUNNER_TEMP/cleaned.html"
+          echo "cleaned output (first 400 bytes):"
+          head -c 400 "$RUNNER_TEMP/cleaned.html"
+          echo
+          grep -q "Cleaner Heading" "$RUNNER_TEMP/cleaned.html"
+
+      - name: Serve fixture page
+        run: |
+          mkdir -p "$RUNNER_TEMP/site"
+          cat > "$RUNNER_TEMP/site/index.html" <<'HTML'
+          <!doctype html>
+          <html>
+          <head><title>Container Smoke</title></head>
+          <body>
+          <nav id="site-nav"><a href="/">NAV-CHROME-MARKER Home</a> | <a href="/about">About</a></nav>
+          <main>
+          <article>
+          <h1>Container Smoke Heading</h1>
+          <p>This paragraph exists to push the document over the eight hundred character preprocessing threshold so the static dom_smoothie_cli runs inside the container. Without that, the loader would hand back the raw HTML and the chrome markers below would survive into the markdown.</p>
+          <p>A second paragraph adds more prose for the readability scorer to work with, ensuring the article body wins over the surrounding navigation and footer blocks that wrap it on a typical documentation page.</p>
+          <p>A third paragraph makes the page comfortably large enough for extraction, and also gives the markdown converter several blocks of text to render after preprocessing has stripped the boilerplate.</p>
+          </article>
+          </main>
+          <footer>FOOTER-CHROME-MARKER</footer>
+          </body>
+          </html>
+          HTML
+          nohup python3 -m http.server 18099 --bind 127.0.0.1 --directory "$RUNNER_TEMP/site" \
+            >/dev/null 2>&1 &
+
+      - name: Run container and wait for health
+        run: |
+          docker run -d --name webloader --network host \
+            -e API_PORT=14786 \
+            -e ALLOW_PRIVATE_URLS=1 \
+            webloader:ci
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:14786/health" -o "$RUNNER_TEMP/health.json"; then
+              cat "$RUNNER_TEMP/health.json"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container never became healthy; logs:"
+          docker logs webloader
+          exit 1
+
+      # Positive test: preprocessing must run inside the container, so the
+      # footer chrome is gone. If the cleaner binary is missing or built for
+      # the wrong CPU, src/preprocess.ts degrades to raw HTML and this fails.
+      - name: Load fixture (preprocessing on)
+        run: |
+          curl -fsS -X POST "http://127.0.0.1:14786/load" \
+            -H 'content-type: application/json' \
+            -d '{"url":"http://127.0.0.1:18099/index.html"}' \
+            -o "$RUNNER_TEMP/load.json"
+          python3 - "$RUNNER_TEMP/load.json" <<'PY'
+          import json, sys
+
+          doc = json.load(open(sys.argv[1]))
+          md = doc["content"]
+          assert "Container Smoke Heading" in md, md[:400]
+          assert "FOOTER-CHROME-MARKER" not in md, (
+              "preprocessing did not run inside the container: footer chrome survived"
+          )
+          print("preprocessing ran inside the container: article kept, footer chrome removed")
+          PY
+
+      # Negative control: with preprocessing off the same fixture must keep the
+      # chrome. This proves the assertion above actually discriminates.
+      - name: Load fixture (preprocessing off, control)
+        run: |
+          docker rm -f webloader
+          docker run -d --name webloader-nopre --network host \
+            -e API_PORT=14786 \
+            -e ALLOW_PRIVATE_URLS=1 \
+            -e PREPROCESS_HTML=0 \
+            webloader:ci
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:14786/health" -o /dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS -X POST "http://127.0.0.1:14786/load" \
+            -H 'content-type: application/json' \
+            -d '{"url":"http://127.0.0.1:18099/index.html"}' \
+            -o "$RUNNER_TEMP/load-nopre.json"
+          python3 - "$RUNNER_TEMP/load-nopre.json" <<'PY'
+          import json, sys
+
+          doc = json.load(open(sys.argv[1]))
+          md = doc["content"]
+          assert "Container Smoke Heading" in md, md[:400]
+          assert "FOOTER-CHROME-MARKER" in md, (
+              "control failed: raw HTML should keep the footer chrome"
+          )
+          print("control passed: without preprocessing the footer chrome is preserved")
+          PY
+
+      - name: Container logs
+        if: always()
+        run: docker logs webloader-nopre || docker logs webloader || true
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f webloader webloader-nopre || true

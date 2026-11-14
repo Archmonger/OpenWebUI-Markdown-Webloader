@@ -1,3 +1,6 @@
+# LLM artifacts
+memories/*
+
 # Dependencies
 node_modules/
 
