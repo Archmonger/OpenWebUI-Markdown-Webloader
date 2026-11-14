@@ -131,9 +131,13 @@ jobs:
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
+          args=()
+          for digest in *; do
+            args+=("$IMAGE@sha256:$digest")
+          done
           docker buildx imagetools create \
             $(jq -r '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '%s@sha256:%s ' "$IMAGE" *)
+            "${args[@]}"
 
       - name: Inspect manifest list
         run: docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
