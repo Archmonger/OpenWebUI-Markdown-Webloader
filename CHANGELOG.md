@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-14
+
 ### Changed
 
 - The GHCR image is now published as a multi-arch manifest for
