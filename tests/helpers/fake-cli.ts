@@ -53,7 +53,7 @@ try {
 const input = await Bun.stdin.text();
 
 if (spec.argsLog) {
-  writeFileSync(spec.argsLog, process.argv.slice(2).join(" "));
+  writeFileSync(spec.argsLog, process.argv.join(" "));
 }
 
 switch (spec.mode) {
