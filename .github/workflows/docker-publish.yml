@@ -54,11 +54,16 @@ jobs:
 
       # Metadata is used here for image labels (and the canonical image name);
       # the final tags are only applied by the merge job.
-      - name: Docker metadata (labels)
+      - name: Docker metadata (labels and canonical name)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push by digest
         id: build
