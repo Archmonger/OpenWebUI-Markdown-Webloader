@@ -42,6 +42,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # GHCR requires lowercase repository names, but GitHub owners may contain
+      # uppercase letters (e.g. `Archmonger`). Normalize once for every step.
+      - name: Normalize image reference
+        id: image
+        run: |
+          echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
+          echo "name=${IMAGE,,}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -72,7 +80,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name-canonical=true,push-by-digest=true
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.digest_name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.digest_name }}
 
@@ -105,7 +113,10 @@ jobs:
       # GHCR requires lowercase repository names, but GitHub owners may contain
       # uppercase letters (e.g. `Archmonger`). Normalize once for every step.
       - name: Normalize image reference
-        run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
+        id: image
+        run: |
+          echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
+          echo "name=${IMAGE,,}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
